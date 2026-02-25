@@ -172,21 +172,30 @@ class TimelineBuilder:
             content = update['content']
             truncated = content[:60] + '...' if len(content) > 60 else content
 
+            # Parse linked_items from GROUP_CONCAT (may be None, empty, or have gaps)
+            linked_items_str = update.get('linked_items') or ''
+            parsed_linked = []
+            first_linked = None
+            for part in linked_items_str.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        val = int(part)
+                        parsed_linked.append(val)
+                        if first_linked is None:
+                            first_linked = val
+                    except (ValueError, TypeError):
+                        logger.debug("Non-numeric linked_items value: %r", part)
+
             entry = {
                 'timestamp': update['created_at'],
                 'activity_type': 'update',
-                'item_id': update.get('item_id') or (
-                    int(update['linked_items'].split(',')[0])
-                    if update.get('linked_items') else None
-                ),
+                'item_id': update.get('item_id') or first_linked,
                 'title': f"Update: {truncated}",
                 'details': {
                     'update_id': update['id'],
                     'content': content,
-                    'linked_items': (
-                        [int(x) for x in update['linked_items'].split(',')]
-                        if update.get('linked_items') else []
-                    )
+                    'linked_items': parsed_linked
                 },
                 'actor': None,
                 'icon': ACTIVITY_ICONS['update'],

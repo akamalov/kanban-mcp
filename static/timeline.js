@@ -1,8 +1,8 @@
 /**
  * Timeline drawer functionality for Kanban MCP Web UI
  *
- * Security Note: All user-generated content is escaped via escapeHtml()
- * before being inserted into the DOM to prevent XSS attacks.
+ * Security Note: All user-generated content is escaped via textContent
+ * assignment before being inserted into the DOM to prevent XSS attacks.
  */
 
 // Timeline state

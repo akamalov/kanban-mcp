@@ -333,7 +333,10 @@ def export_data(
     # Parse item IDs if provided
     parsed_item_ids = None
     if item_ids:
-        parsed_item_ids = [int(x.strip()) for x in item_ids.split(',') if x.strip()]
+        try:
+            parsed_item_ids = [int(x.strip()) for x in item_ids.split(',') if x.strip()]
+        except ValueError:
+            return "Error: Invalid item IDs — must be comma-separated integers (e.g. '1,2,3')"
 
     # Build export data
     builder = ExportBuilder(db, project_id)

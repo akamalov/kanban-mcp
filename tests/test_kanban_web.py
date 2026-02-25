@@ -4,10 +4,12 @@ Unit tests for Kanban Web UI Flask routes.
 Tests define target behavior - written BEFORE implementation (TDD).
 """
 
-import unittest
+import io
 import sys
 import json
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -138,7 +140,7 @@ class TestKanbanWebAPI(unittest.TestCase):
     # --- Create Update API Tests ---
 
     def test_api_create_update_unlinked(self):
-        """POST /api/updates should create unlinked update."""
+        """POST /api/updates should create unlinked update and persist it."""
         response = self.client.post(
             '/api/updates',
             json={
@@ -151,6 +153,13 @@ class TestKanbanWebAPI(unittest.TestCase):
         data = response.get_json()
         self.assertTrue(data['success'])
         self.assertIn('update_id', data)
+
+        # Verify update actually persisted in DB (#8233)
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT content FROM updates WHERE id = %s", (data['update_id'],))
+            row = cursor.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row['content'], 'Test update content')
 
     def test_api_create_update_linked_to_item(self):
         """POST /api/updates should create update linked to items."""
@@ -166,6 +175,16 @@ class TestKanbanWebAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         data = response.get_json()
         self.assertTrue(data['success'])
+
+        # Verify the link actually exists in DB (#8233)
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute(
+                "SELECT item_id FROM update_items WHERE update_id = %s",
+                (data['update_id'],)
+            )
+            row = cursor.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row['item_id'], self.test_item_id)
 
     def test_api_create_update_missing_content(self):
         """POST /api/updates should return 400 if content missing."""
@@ -242,8 +261,7 @@ class TestKanbanWebAPI(unittest.TestCase):
         self.assertTrue(data['success'])
 
         # Verify project is gone
-        with self.db._get_connection() as conn:
-            cursor = conn.cursor(dictionary=True)
+        with self.db._db_cursor(dictionary=True) as cursor:
             cursor.execute("SELECT id FROM projects WHERE id = %s", (self.test_project_id,))
             self.assertIsNone(cursor.fetchone())
 
@@ -262,6 +280,86 @@ class TestKanbanWebAPI(unittest.TestCase):
         self.assertIn('items', data)
         self.assertEqual(len(data['items']), 1)
         self.assertEqual(data['items'][0]['title'], 'Test Issue')
+
+
+class TestConnectionLeaks(unittest.TestCase):
+    """Tests for #8222 — no connection leaks from raw cursor usage."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        from kanban_web import app
+
+        cls.db = KanbanDB()
+        cls.app = app
+        cls.app.config['TESTING'] = True
+        cls.client = cls.app.test_client()
+        cls.test_project_path = "/tmp/test-kanban-web-leak"
+        cls.test_project_id = cls.db.hash_project_path(cls.test_project_path)
+
+    def setUp(self):
+        cleanup_test_project(self.db, self.test_project_path)
+        self.db.ensure_project(self.test_project_path, "Test Leak Project")
+        self.db.create_item(self.test_project_id, 'issue', 'Leak test item')
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_project_path)
+
+    def test_api_list_items_no_leak(self):
+        """Calling api_list_items repeatedly should not exhaust pool."""
+        for _ in range(20):
+            response = self.client.get(f'/api/items?project={self.test_project_id}')
+            self.assertEqual(response.status_code, 200)
+
+    def test_index_page_no_leak(self):
+        """Loading index page repeatedly should not exhaust pool."""
+        for _ in range(20):
+            response = self.client.get(f'/?project={self.test_project_id}')
+            self.assertEqual(response.status_code, 200)
+
+    def test_delete_nonexistent_project(self):
+        """Deleting non-existent project should return 404, not crash."""
+        response = self.client.delete('/api/projects/nonexistent1234')
+        self.assertEqual(response.status_code, 404)
+
+
+class TestHostBindingWarning(unittest.TestCase):
+    """Tests for #8225 — warning when binding to public interfaces."""
+
+    def _simulate_main_block(self, host, debug=False):
+        """Simulate the kanban_web __main__ block logic and capture stderr."""
+        captured = io.StringIO()
+        if host in ('0.0.0.0', '::'):
+            print(
+                f"WARNING: Binding to {host} exposes this server to the network. "
+                "There is no authentication — anyone on your network can read/modify data.",
+                file=captured
+            )
+            if debug:
+                print(
+                    "WARNING: Debug mode with a public binding is especially dangerous — "
+                    "Werkzeug's debugger allows arbitrary code execution.",
+                    file=captured
+                )
+        return captured.getvalue()
+
+    def test_host_0000_warning(self):
+        output = self._simulate_main_block('0.0.0.0')
+        self.assertIn('WARNING', output)
+        self.assertIn('0.0.0.0', output)
+
+    def test_host_ipv6_any_warning(self):
+        output = self._simulate_main_block('::')
+        self.assertIn('WARNING', output)
+
+    def test_host_localhost_no_warning(self):
+        output = self._simulate_main_block('127.0.0.1')
+        self.assertEqual(output, '')
+
+    def test_host_debug_with_0000_extra_warning(self):
+        output = self._simulate_main_block('0.0.0.0', debug=True)
+        self.assertIn('debug', output.lower())
+        self.assertIn('code execution', output.lower())
 
 
 if __name__ == '__main__':

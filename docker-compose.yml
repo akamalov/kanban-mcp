@@ -1,0 +1,33 @@
+services:
+  db:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: kanban_root
+      MYSQL_DATABASE: kanban
+      MYSQL_USER: kanban
+      MYSQL_PASSWORD: changeme
+    volumes:
+      - kanban_data:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: mysqladmin ping -h localhost
+      interval: 5s
+      retries: 10
+
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      KANBAN_DB_HOST: db
+      KANBAN_DB_USER: kanban
+      KANBAN_DB_PASSWORD: changeme
+      KANBAN_DB_NAME: kanban
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  kanban_data:

@@ -243,8 +243,7 @@ def api_list_items():
     if not project_id:
         return jsonify({'items': []})
 
-    with db._get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
+    with db._db_cursor(dictionary=True) as cursor:
         cursor.execute("""
             SELECT i.id, i.title, t.name as type, s.name as status
             FROM items i
@@ -279,40 +278,28 @@ def api_create_update():
 @app.route('/api/projects/<project_id>', methods=['DELETE'])
 def api_delete_project(project_id):
     """Delete a project and all its data."""
-    with db._get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
-        try:
-            # Check project exists
-            cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
-            if not cursor.fetchone():
-                return jsonify({'success': False, 'error': 'Project not found'}), 404
+    with db._db_cursor(dictionary=True, commit=True) as cursor:
+        # Check project exists
+        cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
+        if not cursor.fetchone():
+            return jsonify({'success': False, 'error': 'Project not found'}), 404
 
-            # Delete in order respecting foreign keys (all in same transaction)
-            cursor.execute("""
-                DELETE FROM update_items
-                WHERE update_id IN (SELECT id FROM updates WHERE project_id = %s)
-            """, (project_id,))
-            cursor.execute("DELETE FROM updates WHERE project_id = %s", (project_id,))
-            cursor.execute("""
-                DELETE FROM item_tags
-                WHERE item_id IN (SELECT id FROM items WHERE project_id = %s)
-            """, (project_id,))
-            cursor.execute("""
-                DELETE FROM item_relationships
-                WHERE source_item_id IN (SELECT id FROM items WHERE project_id = %s)
-                   OR target_item_id IN (SELECT id FROM items WHERE project_id = %s)
-            """, (project_id, project_id))
-            cursor.execute("""
-                DELETE FROM status_history
-                WHERE item_id IN (SELECT id FROM items WHERE project_id = %s)
-            """, (project_id,))
-            cursor.execute("DELETE FROM items WHERE project_id = %s", (project_id,))
-            cursor.execute("DELETE FROM tags WHERE project_id = %s", (project_id,))
-            cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+        # Clean up embeddings (no FK to projects, must delete manually)
+        cursor.execute("""
+            DELETE FROM embeddings WHERE source_type = 'item'
+            AND source_id IN (SELECT id FROM items WHERE project_id = %s)
+        """, (project_id,))
+        cursor.execute("""
+            DELETE FROM embeddings WHERE source_type = 'decision'
+            AND source_id IN (SELECT id FROM item_decisions WHERE item_id IN (SELECT id FROM items WHERE project_id = %s))
+        """, (project_id,))
+        cursor.execute("""
+            DELETE FROM embeddings WHERE source_type = 'update'
+            AND source_id IN (SELECT id FROM updates WHERE project_id = %s)
+        """, (project_id,))
+
+        # CASCADE handles items, updates, tags, relationships, etc.
+        cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
 
     return jsonify({'success': True})
 
@@ -626,9 +613,7 @@ def get_all_relationships(project_id):
     """Get relationships for all items in a project, organized by item."""
     relationships = {}
     
-    with db._get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
-        
+    with db._db_cursor(dictionary=True) as cursor:
         # Get all relationships where source or target is in this project
         cursor.execute("""
             SELECT r.source_item_id, r.target_item_id, r.relationship_type,
@@ -638,7 +623,7 @@ def get_all_relationships(project_id):
             JOIN items ti ON r.target_item_id = ti.id
             WHERE si.project_id = %s OR ti.project_id = %s
         """, (project_id, project_id))
-        
+
         for rel in cursor.fetchall():
             src_id = rel['source_item_id']
             tgt_id = rel['target_item_id']
@@ -672,8 +657,7 @@ def get_all_relationships(project_id):
 @app.route('/')
 def index():
     # Get all projects
-    with db._get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
+    with db._db_cursor(dictionary=True) as cursor:
         cursor.execute("SELECT id, name, directory_path FROM projects ORDER BY name")
         projects = cursor.fetchall()
     
@@ -685,9 +669,7 @@ def index():
     epic_progress = {}
 
     if current_project:
-        with db._get_connection() as conn:
-            cursor = conn.cursor(dictionary=True)
-
+        with db._db_cursor(dictionary=True) as cursor:
             # Get items
             cursor.execute("""
                 SELECT i.id, i.title, i.description, i.priority, i.complexity,
@@ -786,5 +768,18 @@ if __name__ == '__main__':
     parser.add_argument('--debug', '-d', action='store_true', help='Debug mode')
     args = parser.parse_args()
     
+    if args.host in ('0.0.0.0', '::'):
+        print(
+            f"WARNING: Binding to {args.host} exposes this server to the network. "
+            "There is no authentication — anyone on your network can read/modify data.",
+            file=sys.stderr
+        )
+        if args.debug:
+            print(
+                "WARNING: Debug mode with a public binding is especially dangerous — "
+                "Werkzeug's debugger allows arbitrary code execution.",
+                file=sys.stderr
+            )
+
     print(f"Starting kanban web UI on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug)

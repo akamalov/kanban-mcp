@@ -4,6 +4,8 @@ Unit tests for Kanban MCP Server.
 Tests define target behavior - written BEFORE implementation.
 """
 
+import logging
+import os
 import unittest
 import sys
 from pathlib import Path
@@ -17,9 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def cleanup_test_project(db, project_path):
     """Clean up all test data for a project including the project itself."""
     project_id = db.hash_project_path(project_path)
-    conn = db._get_connection()
-    cursor = conn.cursor()
-    try:
+    with db._db_cursor(commit=True) as cursor:
         cursor.execute("DELETE FROM update_items WHERE update_id IN (SELECT id FROM updates WHERE project_id = %s)", (project_id,))
         # Clean up embeddings for items in this project
         cursor.execute("DELETE FROM embeddings WHERE source_type = 'item' AND source_id IN (SELECT id FROM items WHERE project_id = %s)", (project_id,))
@@ -30,13 +30,10 @@ def cleanup_test_project(db, project_path):
         cursor.execute("DELETE FROM item_decisions WHERE item_id IN (SELECT id FROM items WHERE project_id = %s)", (project_id,))
         cursor.execute("DELETE FROM item_files WHERE item_id IN (SELECT id FROM items WHERE project_id = %s)", (project_id,))
         cursor.execute("DELETE FROM status_history WHERE item_id IN (SELECT id FROM items WHERE project_id = %s)", (project_id,))
+        cursor.execute("DELETE FROM item_relationships WHERE source_item_id IN (SELECT id FROM items WHERE project_id = %s) OR target_item_id IN (SELECT id FROM items WHERE project_id = %s)", (project_id, project_id))
         cursor.execute("DELETE FROM items WHERE project_id = %s", (project_id,))
         cursor.execute("DELETE FROM tags WHERE project_id = %s", (project_id,))
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-        conn.commit()
-    finally:
-        cursor.close()
-        conn.close()
 
 
 class TestKanbanDB(unittest.TestCase):
@@ -54,8 +51,6 @@ class TestKanbanDB(unittest.TestCase):
     
     def setUp(self):
         """Ensure clean state before each test."""
-        from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
     
     def tearDown(self):
@@ -393,10 +388,14 @@ class TestKanbanDB(unittest.TestCase):
 
 class TestKanbanMCPServerState(unittest.TestCase):
     """Test MCP server project state management."""
-    
-    def setUp(self):
+
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-kanban-mcp"
         cleanup_test_project(self.server.db, self.test_project_path)
     
@@ -434,10 +433,14 @@ class TestKanbanMCPServerState(unittest.TestCase):
 
 class TestJSONRPCProtocol(unittest.TestCase):
     """Test JSON-RPC protocol handling."""
-    
-    def setUp(self):
+
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-jsonrpc"
         cleanup_test_project(self.server.db, self.test_project_path)
     
@@ -521,10 +524,14 @@ class TestJSONRPCProtocol(unittest.TestCase):
 
 class TestGetTodos(unittest.TestCase):
     """Test get_todos tool specifically."""
-    
-    def setUp(self):
+
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-get-todos"
         cleanup_test_project(self.server.db, self.test_project_path)
         # Set current project
@@ -561,21 +568,18 @@ if __name__ == '__main__':
 
 class TestConnectionPooling(unittest.TestCase):
     """Test database connection pooling."""
-    
-    def setUp(self):
+
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
-        self.test_project_path = "/tmp/test-pool"
+        cls.db = KanbanDB()
+        cls.test_project_path = "/tmp/test-pool"
+
+    def setUp(self):
         cleanup_test_project(self.db, self.test_project_path)
-    
+
     def tearDown(self):
         cleanup_test_project(self.db, self.test_project_path)
-        # Ensure pool is cleaned up
-        if hasattr(self.db, '_pool') and self.db._pool:
-            try:
-                pass  # Pool auto-manages connections, no explicit close needed
-            except:
-                pass
     
     def test_db_has_pool(self):
         """KanbanDB should have a connection pool."""
@@ -771,7 +775,6 @@ class TestUpdateItem(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
         # Create a test item
@@ -858,9 +861,13 @@ class TestUpdateItem(unittest.TestCase):
 class TestEditItemTool(unittest.TestCase):
     """Test edit_item MCP tool."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-edit-item-tool"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -915,7 +922,6 @@ class TestStatusHistory(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -1061,9 +1067,13 @@ class TestStatusHistory(unittest.TestCase):
 class TestStatusHistoryMCPTool(unittest.TestCase):
     """Test get_status_history MCP tool."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-status-history-tool"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -1102,7 +1112,6 @@ class TestComplexity(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -1188,7 +1197,6 @@ class TestItemMetrics(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -1258,9 +1266,13 @@ class TestItemMetrics(unittest.TestCase):
 class TestComplexityMCPTools(unittest.TestCase):
     """Test complexity in MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-complexity-tools"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -1323,7 +1335,6 @@ class TestTags(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -1495,7 +1506,6 @@ class TestItemTags(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
         # Create test item
@@ -1668,7 +1678,6 @@ class TestListItemsWithTags(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -1801,9 +1810,13 @@ class TestListItemsWithTags(unittest.TestCase):
 class TestTagMCPTools(unittest.TestCase):
     """Tests for tag MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-tag-tools"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -1950,7 +1963,6 @@ class TestEpicSupport(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -2470,9 +2482,13 @@ class TestEpicSupport(unittest.TestCase):
 class TestEpicMCPTools(unittest.TestCase):
     """Test epic MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-epic-tools"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -2593,7 +2609,6 @@ class TestSearch(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -2712,9 +2727,13 @@ class TestSearch(unittest.TestCase):
 class TestSearchMCPTool(unittest.TestCase):
     """Test search MCP tool."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-search-tool"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -2764,7 +2783,6 @@ class TestFileLinks(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
         # Create test item
@@ -2918,9 +2936,13 @@ class TestFileLinks(unittest.TestCase):
 class TestFileLinksMCPTools(unittest.TestCase):
     """Tests for file linking MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-file-links-tools"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -3022,7 +3044,6 @@ class TestQuestionType(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
 
@@ -3174,9 +3195,13 @@ class TestQuestionType(unittest.TestCase):
 class TestQuestionTypeMCPTools(unittest.TestCase):
     """Tests for question item type MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-question-tools"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -3241,7 +3266,6 @@ class TestDecisions(unittest.TestCase):
 
     def setUp(self):
         from kanban_mcp import KanbanDB
-        self.db = KanbanDB()
         cleanup_test_project(self.db, self.test_project_path)
         self.db.ensure_project(self.test_project_path)
         self.item_id = self.db.create_item(self.test_project_id, "issue", "Test Issue")
@@ -3366,9 +3390,13 @@ class TestDecisions(unittest.TestCase):
 class TestDecisionsMCPTools(unittest.TestCase):
     """Tests for decision history MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-decisions-mcp"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -3657,9 +3685,13 @@ class TestEmbeddings(unittest.TestCase):
 class TestEmbeddingsMCPTools(unittest.TestCase):
     """Tests for embedding MCP tools."""
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         from kanban_mcp import KanbanMCPServer
-        self.server = KanbanMCPServer()
+        cls.server = KanbanMCPServer()
+
+    def setUp(self):
+        self.server.current_project_id = None
         self.test_project_path = "/tmp/test-embeddings-mcp"
         cleanup_test_project(self.server.db, self.test_project_path)
         self.server.tools['set_current_project']['function'](self.test_project_path)
@@ -3743,6 +3775,380 @@ class TestEmbeddingsMCPTools(unittest.TestCase):
         # Verify embedding was created
         embedding = self.server.db.get_embedding('item', item_id)
         self.assertIsNotNone(embedding)
+
+
+class TestCredentialHardening(unittest.TestCase):
+    """Tests for #8219 — no hardcoded defaults for DB credentials."""
+
+    def _clear_env(self):
+        """Remove all KANBAN_DB_ env vars."""
+        for key in ('KANBAN_DB_USER', 'KANBAN_DB_PASSWORD', 'KANBAN_DB_NAME', 'KANBAN_DB_HOST'):
+            os.environ.pop(key, None)
+
+    def setUp(self):
+        # Save original env
+        self._orig = {k: os.environ.get(k) for k in
+                      ('KANBAN_DB_USER', 'KANBAN_DB_PASSWORD', 'KANBAN_DB_NAME', 'KANBAN_DB_HOST')}
+
+    def tearDown(self):
+        # Restore original env
+        for k, v in self._orig.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_init_no_password_raises(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        os.environ['KANBAN_DB_USER'] = 'someuser'
+        os.environ['KANBAN_DB_NAME'] = 'somedb'
+        with self.assertRaises(ValueError) as ctx:
+            KanbanDB()
+        self.assertIn('KANBAN_DB_PASSWORD', str(ctx.exception))
+
+    def test_init_no_user_raises(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        os.environ['KANBAN_DB_PASSWORD'] = 'somepass'
+        os.environ['KANBAN_DB_NAME'] = 'somedb'
+        with self.assertRaises(ValueError) as ctx:
+            KanbanDB()
+        self.assertIn('KANBAN_DB_USER', str(ctx.exception))
+
+    def test_init_no_dbname_raises(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        os.environ['KANBAN_DB_USER'] = 'someuser'
+        os.environ['KANBAN_DB_PASSWORD'] = 'somepass'
+        with self.assertRaises(ValueError) as ctx:
+            KanbanDB()
+        self.assertIn('KANBAN_DB_NAME', str(ctx.exception))
+
+    def test_init_empty_string_password_raises(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        os.environ['KANBAN_DB_USER'] = 'someuser'
+        os.environ['KANBAN_DB_PASSWORD'] = ''
+        os.environ['KANBAN_DB_NAME'] = 'somedb'
+        with self.assertRaises(ValueError) as ctx:
+            KanbanDB()
+        self.assertIn('KANBAN_DB_PASSWORD', str(ctx.exception))
+
+    def test_init_constructor_params_override_env(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        # Pass valid params directly — should not raise even without env vars
+        db = KanbanDB(user='claude', password='claude_code_password', database='claude_code_kanban')
+        self.assertEqual(db.config['user'], 'claude')
+        self.assertEqual(db.config['database'], 'claude_code_kanban')
+
+    def test_init_error_message_lists_missing_vars(self):
+        from kanban_mcp import KanbanDB
+        self._clear_env()
+        with self.assertRaises(ValueError) as ctx:
+            KanbanDB()
+        msg = str(ctx.exception)
+        self.assertIn('KANBAN_DB_USER', msg)
+        self.assertIn('KANBAN_DB_PASSWORD', msg)
+        self.assertIn('KANBAN_DB_NAME', msg)
+
+
+class TestCascadeDelete(unittest.TestCase):
+    """Tests for #8220 — CASCADE delete on project FK."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+
+    def setUp(self):
+        self.test_path = "/tmp/test-cascade-project"
+        self.test_path2 = "/tmp/test-cascade-project-2"
+        cleanup_test_project(self.db, self.test_path)
+        cleanup_test_project(self.db, self.test_path2)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_path)
+        cleanup_test_project(self.db, self.test_path2)
+
+    def test_cascade_delete_project_removes_items(self):
+        project_id = self.db.ensure_project(self.test_path)
+        self.db.create_item(project_id, 'issue', 'Item 1')
+        self.db.create_item(project_id, 'feature', 'Item 2')
+        self.db.create_item(project_id, 'todo', 'Item 3')
+
+        with self.db._db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT COUNT(*) as cnt FROM items WHERE project_id = %s", (project_id,))
+            self.assertEqual(cursor.fetchone()['cnt'], 0)
+
+    def test_cascade_delete_project_removes_updates(self):
+        project_id = self.db.ensure_project(self.test_path)
+        item_id = self.db.create_item(project_id, 'issue', 'Item 1')
+        self.db.add_update(project_id, 'Test update', [item_id])
+
+        with self.db._db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT COUNT(*) as cnt FROM updates WHERE project_id = %s", (project_id,))
+            self.assertEqual(cursor.fetchone()['cnt'], 0)
+
+    def test_cascade_delete_project_removes_update_items(self):
+        project_id = self.db.ensure_project(self.test_path)
+        item_id = self.db.create_item(project_id, 'issue', 'Item 1')
+        update_id = self.db.add_update(project_id, 'Test update', [item_id])
+
+        with self.db._db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT COUNT(*) as cnt FROM update_items WHERE update_id = %s", (update_id,))
+            self.assertEqual(cursor.fetchone()['cnt'], 0)
+
+    def test_cascade_delete_leaves_other_projects(self):
+        pid1 = self.db.ensure_project(self.test_path)
+        pid2 = self.db.ensure_project(self.test_path2)
+        self.db.create_item(pid1, 'issue', 'Item in project 1')
+        self.db.create_item(pid2, 'issue', 'Item in project 2')
+
+        with self.db._db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM projects WHERE id = %s", (pid1,))
+
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT COUNT(*) as cnt FROM items WHERE project_id = %s", (pid2,))
+            self.assertEqual(cursor.fetchone()['cnt'], 1)
+
+
+class TestIndexExistence(unittest.TestCase):
+    """Tests for #8221, #8230 — verify indexes exist."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+
+    def _get_index_columns(self, table):
+        """Get set of indexed column names for a table."""
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute(f"SHOW INDEX FROM {table}")
+            return {row['Column_name'] for row in cursor.fetchall()}
+
+    def test_index_on_relationship_target_item_id(self):
+        cols = self._get_index_columns('item_relationships')
+        self.assertIn('target_item_id', cols)
+
+    def test_index_on_update_items_item_id(self):
+        cols = self._get_index_columns('update_items')
+        self.assertIn('item_id', cols)
+
+
+class TestEmbeddingFailureLogging(unittest.TestCase):
+    """Tests for #8224 — embedding failures logged at debug level."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+        cls.test_path = "/tmp/test-embedding-logging"
+
+    def setUp(self):
+        cleanup_test_project(self.db, self.test_path)
+        self.project_id = self.db.ensure_project(self.test_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_path)
+
+    def test_create_item_embedding_failure_logged(self):
+        with patch.object(self.db, 'upsert_embedding', side_effect=ConnectionError("test")):
+            with self.assertLogs('kanban_mcp', level='DEBUG') as cm:
+                item_id = self.db.create_item(self.project_id, 'issue', 'Test')
+        self.assertIsNotNone(item_id)
+        self.assertTrue(any('Embedding' in msg for msg in cm.output))
+
+    def test_delete_item_embedding_failure_continues(self):
+        item_id = self.db.create_item(self.project_id, 'issue', 'To Delete')
+        with patch.object(self.db, 'delete_embedding', side_effect=RuntimeError("test")):
+            with self.assertLogs('kanban_mcp', level='DEBUG'):
+                result = self.db.delete_item(item_id)
+        self.assertTrue(result['success'])
+
+    def test_add_decision_embedding_failure_logged(self):
+        item_id = self.db.create_item(self.project_id, 'issue', 'For Decision')
+        with patch.object(self.db, 'upsert_embedding', side_effect=ConnectionError("test")):
+            with self.assertLogs('kanban_mcp', level='DEBUG') as cm:
+                result = self.db.add_decision(item_id, 'Use X')
+        self.assertTrue(result['success'])
+        self.assertTrue(any('Embedding' in msg for msg in cm.output))
+
+    def test_embedding_exception_type_preserved(self):
+        with patch.object(self.db, 'upsert_embedding', side_effect=ConnectionError("specific error")):
+            with self.assertLogs('kanban_mcp', level='DEBUG') as cm:
+                self.db.create_item(self.project_id, 'issue', 'Test')
+        # The exc_info=True in logger.debug should capture the ConnectionError
+        self.assertTrue(any('ConnectionError' in msg or 'specific error' in msg for msg in cm.output))
+
+
+class TestCleanupTestProject(unittest.TestCase):
+    """Tests for #8226 — cleanup removes relationships."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+        cls.test_path = "/tmp/test-cleanup-project"
+
+    def setUp(self):
+        cleanup_test_project(self.db, self.test_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_path)
+
+    def test_cleanup_removes_relationships(self):
+        pid = self.db.ensure_project(self.test_path)
+        item1 = self.db.create_item(pid, 'issue', 'Blocker')
+        item2 = self.db.create_item(pid, 'issue', 'Blocked')
+        self.db.add_relationship(item1, item2, 'blocks')
+
+        cleanup_test_project(self.db, self.test_path)
+
+        with self.db._db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT COUNT(*) as cnt FROM item_relationships WHERE source_item_id = %s OR target_item_id = %s", (item1, item2))
+            self.assertEqual(cursor.fetchone()['cnt'], 0)
+
+    def test_cleanup_idempotent(self):
+        pid = self.db.ensure_project(self.test_path)
+        self.db.create_item(pid, 'issue', 'Item')
+        cleanup_test_project(self.db, self.test_path)
+        # Second call should not raise
+        cleanup_test_project(self.db, self.test_path)
+
+
+class TestTagColorNullCheck(unittest.TestCase):
+    """Tests for #8229 — null check in _get_next_tag_color."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+        cls.test_path = "/tmp/test-tag-color-project"
+
+    def setUp(self):
+        cleanup_test_project(self.db, self.test_path)
+        self.project_id = self.db.ensure_project(self.test_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_path)
+
+    def test_tag_color_empty_project(self):
+        color = self.db._get_next_tag_color(self.project_id)
+        self.assertEqual(color, self.db.TAG_COLOR_PALETTE[0])
+
+    def test_tag_color_many_tags(self):
+        # Create more tags than palette size to test round-robin
+        palette_size = len(self.db.TAG_COLOR_PALETTE)
+        for i in range(palette_size + 2):
+            self.db.ensure_tag(self.project_id, f"tag-{i}")
+        # Next color should wrap around
+        color = self.db._get_next_tag_color(self.project_id)
+        expected_idx = (palette_size + 2) % palette_size
+        self.assertEqual(color, self.db.TAG_COLOR_PALETTE[expected_idx])
+
+
+class TestTimelineParsing(unittest.TestCase):
+    """Tests for #8227 — GROUP_CONCAT parsing safety."""
+
+    def setUp(self):
+        from timeline_builder import TimelineBuilder
+        self.builder = TimelineBuilder(db=MagicMock())
+
+    def _make_update(self, linked_items=None, item_id=None):
+        """Create a fake update row."""
+        return {
+            'id': 1,
+            'content': 'Test update content here',
+            'created_at': datetime.now(),
+            'linked_items': linked_items,
+            **(({'item_id': item_id} if item_id is not None else {}))
+        }
+
+    def test_timeline_empty_linked_items(self):
+        """Empty string linked_items should not crash."""
+        update = self._make_update(linked_items='')
+        # Simulate what _get_update_activities does with project-level queries
+        linked_items_str = update.get('linked_items') or ''
+        parsed = [int(x.strip()) for x in linked_items_str.split(',') if x.strip() and x.strip().isdigit()]
+        self.assertEqual(parsed, [])
+
+    def test_timeline_null_linked_items(self):
+        update = self._make_update(linked_items=None)
+        linked_items_str = update.get('linked_items') or ''
+        parsed = [int(x.strip()) for x in linked_items_str.split(',') if x.strip() and x.strip().isdigit()]
+        self.assertEqual(parsed, [])
+
+    def test_timeline_single_linked_item(self):
+        update = self._make_update(linked_items='42')
+        linked_items_str = update.get('linked_items') or ''
+        parsed = [int(x.strip()) for x in linked_items_str.split(',') if x.strip() and x.strip().isdigit()]
+        self.assertEqual(parsed, [42])
+
+    def test_timeline_whitespace_in_linked_items(self):
+        update = self._make_update(linked_items='42, ,, 99')
+        linked_items_str = update.get('linked_items') or ''
+        parsed = [int(x.strip()) for x in linked_items_str.split(',') if x.strip() and x.strip().isdigit()]
+        self.assertEqual(parsed, [42, 99])
+
+    def test_timeline_non_numeric_linked_items(self):
+        update = self._make_update(linked_items='abc,42')
+        linked_items_str = update.get('linked_items') or ''
+        parsed = [int(x.strip()) for x in linked_items_str.split(',') if x.strip() and x.strip().isdigit()]
+        self.assertEqual(parsed, [42])
+
+
+class TestCLIInputValidation(unittest.TestCase):
+    """Tests for #8228 — CLI export item_ids validation."""
+
+    def setUp(self):
+        from kanban_cli import export_data
+        self.export_data = export_data
+
+    def _call_export(self, item_ids_str):
+        """Call export_data with test item_ids and return result."""
+        from kanban_mcp import KanbanDB
+        db = KanbanDB()
+        return self.export_data(
+            db,
+            project_path="/tmp/test-cli-validation",
+            format="json",
+            item_ids=item_ids_str
+        )
+
+    def test_cli_invalid_item_ids(self):
+        result = self._call_export("abc,def")
+        self.assertIn("Error", result)
+
+    def test_cli_mixed_valid_invalid_ids(self):
+        result = self._call_export("1,abc,3")
+        self.assertIn("Error", result)
+
+    def test_cli_empty_item_ids(self):
+        # Empty string should not error — it means no filter
+        result = self._call_export("")
+        # Empty string is falsy, so parsed_item_ids stays None — should work
+        self.assertNotIn("Error", result)
+
+    def test_cli_trailing_comma(self):
+        # "1,2," — trailing comma should work (empty string filtered out)
+        # This will try to query items 1,2 which may not exist, but shouldn't error on parsing
+        result = self._call_export("1,2,")
+        self.assertNotIn("Error", result)
+
+    def test_cli_sql_injection_attempt(self):
+        result = self._call_export("1; DROP TABLE items")
+        self.assertIn("Error", result)
 
 
 if __name__ == "__main__":

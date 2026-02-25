@@ -24,6 +24,16 @@ import numpy as np
 
 from kanban_export import ExportBuilder, export_to_format
 
+# Load .env file if present (looks in CWD and script directory)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # CWD
+    load_dotenv(Path(__file__).parent / '.env')  # script directory
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
+
 # Lazy imports for embedding - only loaded when needed
 _onnx_session = None
 _tokenizer = None
@@ -33,6 +43,8 @@ class KanbanDB:
     """Database operations for kanban system."""
 
     # Predefined color palette for auto-assignment to tags
+    _pool_counter = 0
+
     TAG_COLOR_PALETTE = [
         '#4ade80',  # Green
         '#60a5fa',  # Blue
@@ -48,17 +60,38 @@ class KanbanDB:
         '#84cc16',  # Lime
     ]
 
-    def __init__(self, host: str = None, user: str = None, 
+    def __init__(self, host: str = None, user: str = None,
                  password: str = None, database: str = None,
-                 pool_size: int = 5):
+                 pool_size: int = None):
+        resolved_user = user or os.environ.get("KANBAN_DB_USER", "")
+        resolved_password = password or os.environ.get("KANBAN_DB_PASSWORD", "")
+        resolved_database = database or os.environ.get("KANBAN_DB_NAME", "")
+
+        missing = []
+        if not resolved_user:
+            missing.append("KANBAN_DB_USER")
+        if not resolved_password:
+            missing.append("KANBAN_DB_PASSWORD")
+        if not resolved_database:
+            missing.append("KANBAN_DB_NAME")
+        if missing:
+            raise ValueError(
+                f"Missing required database credentials: {', '.join(missing)}. "
+                "Set them as environment variables or pass to constructor."
+            )
+
         self.config = {
             "host": host or os.environ.get("KANBAN_DB_HOST", "localhost"),
-            "user": user or os.environ.get("KANBAN_DB_USER", ""),
-            "password": password or os.environ.get("KANBAN_DB_PASSWORD", ""),
-            "database": database or os.environ.get("KANBAN_DB_NAME", ""),
+            "user": resolved_user,
+            "password": resolved_password,
+            "database": resolved_database,
         }
+        if pool_size is None:
+            pool_size = int(os.environ.get("KANBAN_DB_POOL_SIZE", "5"))
+
+        KanbanDB._pool_counter += 1
         self._pool = MySQLConnectionPool(
-            pool_name="kanban_pool",
+            pool_name=f"kanban_pool_{KanbanDB._pool_counter}",
             pool_size=pool_size,
             **self.config
         )
@@ -102,6 +135,13 @@ class KanbanDB:
         finally:
             cursor.close()
             conn.close()
+
+    def _safe_embedding_op(self, op: str, source_type: str, source_id: int):
+        """Run embedding op with debug logging on failure."""
+        try:
+            getattr(self, op)(source_type, source_id)
+        except Exception:
+            logger.debug("Embedding %s failed for %s:%s", op, source_type, source_id, exc_info=True)
 
     @staticmethod
     def hash_project_path(directory_path: str) -> str:
@@ -200,10 +240,7 @@ class KanbanDB:
         self._record_status_change(item_id, None, status_id, 'create')
 
         # Auto-generate embedding (non-blocking, errors logged)
-        try:
-            self.upsert_embedding('item', item_id)
-        except Exception:
-            pass  # Embedding failure shouldn't block item creation
+        self._safe_embedding_op('upsert_embedding', 'item', item_id)
 
         return item_id
 
@@ -627,10 +664,7 @@ class KanbanDB:
     def delete_item(self, item_id: int) -> Dict:
         """Delete an item."""
         # Delete embedding first (before item is deleted)
-        try:
-            self.delete_embedding('item', item_id)
-        except Exception:
-            pass  # Continue with item deletion even if embedding deletion fails
+        self._safe_embedding_op('delete_embedding', 'item', item_id)
 
         with self._db_cursor(commit=True) as cursor:
             cursor.execute("DELETE FROM items WHERE id = %s", (item_id,))
@@ -675,10 +709,7 @@ class KanbanDB:
 
         # Re-embed if title or description changed
         if title is not None or description is not None:
-            try:
-                self.upsert_embedding('item', item_id)
-            except Exception:
-                pass  # Embedding failure shouldn't block update
+            self._safe_embedding_op('upsert_embedding', 'item', item_id)
 
         updated_item = self.get_item(item_id)
         return {"success": True, "item": updated_item}
@@ -700,10 +731,7 @@ class KanbanDB:
                     )
 
         # Auto-generate embedding
-        try:
-            self.upsert_embedding('update', update_id)
-        except Exception:
-            pass  # Embedding failure shouldn't block update creation
+        self._safe_embedding_op('upsert_embedding', 'update', update_id)
 
         return update_id
 
@@ -1088,7 +1116,8 @@ class KanbanDB:
                 "SELECT COUNT(*) FROM tags WHERE project_id = %s",
                 (project_id,)
             )
-            tag_count = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            tag_count = result[0] if result else 0
             return self.TAG_COLOR_PALETTE[tag_count % len(self.TAG_COLOR_PALETTE)]
 
     def ensure_tag(self, project_id: str, name: str, color: str = None) -> int:
@@ -1456,10 +1485,7 @@ class KanbanDB:
             decision_id = cursor.lastrowid
 
         # Auto-generate embedding
-        try:
-            self.upsert_embedding('decision', decision_id)
-        except Exception:
-            pass  # Embedding failure shouldn't block decision creation
+        self._safe_embedding_op('upsert_embedding', 'decision', decision_id)
 
         return {'success': True, 'decision_id': decision_id}
 
@@ -1491,10 +1517,7 @@ class KanbanDB:
             Dict with success status
         """
         # Delete embedding first
-        try:
-            self.delete_embedding('decision', decision_id)
-        except Exception:
-            pass
+        self._safe_embedding_op('delete_embedding', 'decision', decision_id)
 
         with self._db_cursor(commit=True) as cursor:
             cursor.execute("DELETE FROM item_decisions WHERE id = %s", (decision_id,))
@@ -1984,6 +2007,25 @@ class KanbanDB:
         results.sort(key=lambda x: x['similarity'], reverse=True)
         return results[:limit]
 
+    def _rebuild_source_type(self, source_type: str, query: str, params: tuple = ()) -> tuple:
+        """Fetch IDs, close cursor, then rebuild embeddings for each.
+
+        Returns:
+            Tuple of (processed_count, error_list)
+        """
+        with self._db_cursor(dictionary=True) as cursor:
+            cursor.execute(query, params)
+            ids = [row['id'] for row in cursor.fetchall()]
+        # Cursor/connection released before processing
+        processed, errors = 0, []
+        for source_id in ids:
+            result = self.upsert_embedding(source_type, source_id)
+            if result['success']:
+                processed += 1
+            else:
+                errors.append(f"{source_type}:{source_id}: {result.get('error')}")
+        return processed, errors
+
     def rebuild_embeddings(self, project_id: str, source_types: List[str] = None) -> Dict[str, Any]:
         """Rebuild all embeddings for a project.
 
@@ -2000,37 +2042,25 @@ class KanbanDB:
         processed = 0
         errors = []
 
-        with self._db_cursor(dictionary=True) as cursor:
-            if 'item' in source_types:
-                cursor.execute("SELECT id FROM items WHERE project_id = %s", (project_id,))
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('item', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"item:{row['id']}: {result.get('error')}")
+        if 'item' in source_types:
+            p, e = self._rebuild_source_type(
+                'item', "SELECT id FROM items WHERE project_id = %s", (project_id,))
+            processed += p
+            errors.extend(e)
 
-            if 'decision' in source_types:
-                cursor.execute("""
-                    SELECT d.id FROM item_decisions d
-                    JOIN items i ON d.item_id = i.id
-                    WHERE i.project_id = %s
-                """, (project_id,))
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('decision', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"decision:{row['id']}: {result.get('error')}")
+        if 'decision' in source_types:
+            p, e = self._rebuild_source_type(
+                'decision',
+                "SELECT d.id FROM item_decisions d JOIN items i ON d.item_id = i.id WHERE i.project_id = %s",
+                (project_id,))
+            processed += p
+            errors.extend(e)
 
-            if 'update' in source_types:
-                cursor.execute("SELECT id FROM updates WHERE project_id = %s", (project_id,))
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('update', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"update:{row['id']}: {result.get('error')}")
+        if 'update' in source_types:
+            p, e = self._rebuild_source_type(
+                'update', "SELECT id FROM updates WHERE project_id = %s", (project_id,))
+            processed += p
+            errors.extend(e)
 
         return {
             'success': True,
@@ -2053,33 +2083,20 @@ class KanbanDB:
         processed = 0
         errors = []
 
-        with self._db_cursor(dictionary=True) as cursor:
-            if 'item' in source_types:
-                cursor.execute("SELECT id FROM items")
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('item', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"item:{row['id']}: {result.get('error')}")
+        if 'item' in source_types:
+            p, e = self._rebuild_source_type('item', "SELECT id FROM items")
+            processed += p
+            errors.extend(e)
 
-            if 'decision' in source_types:
-                cursor.execute("SELECT id FROM item_decisions")
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('decision', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"decision:{row['id']}: {result.get('error')}")
+        if 'decision' in source_types:
+            p, e = self._rebuild_source_type('decision', "SELECT id FROM item_decisions")
+            processed += p
+            errors.extend(e)
 
-            if 'update' in source_types:
-                cursor.execute("SELECT id FROM updates")
-                for row in cursor.fetchall():
-                    result = self.upsert_embedding('update', row['id'])
-                    if result['success']:
-                        processed += 1
-                    else:
-                        errors.append(f"update:{row['id']}: {result.get('error')}")
+        if 'update' in source_types:
+            p, e = self._rebuild_source_type('update', "SELECT id FROM updates")
+            processed += p
+            errors.extend(e)
 
         return {
             'success': True,

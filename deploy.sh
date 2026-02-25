@@ -18,7 +18,7 @@ echo "Destination: $DEST_DIR"
 echo "Python: $PYTHON"
 
 # Create destination
-mkdir -p "$DEST_DIR/hooks" "$DEST_DIR/templates" "$DEST_DIR/static"
+mkdir -p "$DEST_DIR/hooks" "$DEST_DIR/templates" "$DEST_DIR/static" "$DEST_DIR/migrations"
 
 # Rsync executables and web UI
 rsync -av --delete \
@@ -35,67 +35,52 @@ rsync -av --delete \
     --include='static/' \
     --include='static/*.css' \
     --include='static/*.js' \
+    --include='migrations/' \
+    --include='migrations/*.sql' \
+    --include='.env.example' \
+    --include='Dockerfile' \
+    --include='docker-compose.yml' \
+    --include='.dockerignore' \
     --exclude='*' \
     "$SRC_DIR/" "$DEST_DIR/"
 
+# Set up .env config
+if [[ -f "$DEST_DIR/.env" ]]; then
+    echo "Existing .env preserved at $DEST_DIR/.env"
+elif [[ -f "$SRC_DIR/.env" ]]; then
+    cp "$SRC_DIR/.env" "$DEST_DIR/.env"
+    echo "Copied .env from source to $DEST_DIR"
+else
+    cp "$DEST_DIR/.env.example" "$DEST_DIR/.env"
+    echo "Created .env from .env.example at $DEST_DIR — edit with your credentials"
+fi
+
+echo ""
 echo "Files deployed:"
 ls -la "$DEST_DIR"
 ls -la "$DEST_DIR/hooks"
 ls -la "$DEST_DIR/templates"
 ls -la "$DEST_DIR/static"
 
-# --- Claude Desktop config ---
-CLAUDE_DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"
-if [[ -f "$CLAUDE_DESKTOP_CONFIG" ]]; then
-    echo ""
-    echo "=== Claude Desktop config found ==="
-    if grep -q '"kanban"' "$CLAUDE_DESKTOP_CONFIG" 2>/dev/null; then
-        echo "kanban-mcp already configured in Claude Desktop"
+# --- Docker setup ---
+echo ""
+echo "=== Docker Setup ==="
+if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
+    echo "Docker detected."
+    if docker compose -f "$DEST_DIR/docker-compose.yml" ps --status running 2>/dev/null | grep -q 'db'; then
+        echo "Docker services already running."
     else
-        echo "Adding kanban-mcp to Claude Desktop config..."
-        if command -v jq &>/dev/null; then
-            tmp=$(mktemp)
-            jq --arg py "$PYTHON" --arg dest "$DEST_DIR" '.mcpServers.kanban = {
-                "command": $py,
-                "args": [($dest + "/kanban_mcp.py")]
-            }' "$CLAUDE_DESKTOP_CONFIG" > "$tmp" && mv "$tmp" "$CLAUDE_DESKTOP_CONFIG"
-            echo "Added kanban-mcp to Claude Desktop"
-        else
-            echo "WARNING: jq not installed, cannot auto-configure Claude Desktop"
-            echo "Add manually to $CLAUDE_DESKTOP_CONFIG:"
-            echo "  \"kanban\": { \"command\": \"$PYTHON\", \"args\": [\"$DEST_DIR/kanban_mcp.py\"] }"
-        fi
+        echo "Start MySQL + web UI with:"
+        echo "  cd $DEST_DIR && docker compose up -d"
     fi
+    echo ""
+    echo "Docker commands:"
+    echo "  docker compose -f $DEST_DIR/docker-compose.yml up -d      # start"
+    echo "  docker compose -f $DEST_DIR/docker-compose.yml down        # stop"
+    echo "  docker compose -f $DEST_DIR/docker-compose.yml logs -f     # logs"
 else
-    echo ""
-    echo "Claude Desktop config not found at $CLAUDE_DESKTOP_CONFIG (skipping)"
-fi
-
-# --- Claude Code central config ---
-CLAUDE_CODE_CONFIG="$HOME/.claude.json"
-if [[ -f "$CLAUDE_CODE_CONFIG" ]]; then
-    echo ""
-    echo "=== Claude Code config found ==="
-    if grep -q '"kanban"' "$CLAUDE_CODE_CONFIG" 2>/dev/null; then
-        echo "kanban-mcp already configured in Claude Code"
-    else
-        echo "Adding kanban-mcp to Claude Code config..."
-        if command -v jq &>/dev/null; then
-            tmp=$(mktemp)
-            jq --arg py "$PYTHON" --arg dest "$DEST_DIR" '.mcpServers.kanban = {
-                "command": $py,
-                "args": [($dest + "/kanban_mcp.py")]
-            }' "$CLAUDE_CODE_CONFIG" > "$tmp" && mv "$tmp" "$CLAUDE_CODE_CONFIG"
-            echo "Added kanban-mcp to Claude Code"
-        else
-            echo "WARNING: jq not installed, cannot auto-configure Claude Code"
-            echo "Add manually to $CLAUDE_CODE_CONFIG:"
-            echo "  \"kanban\": { \"command\": \"$PYTHON\", \"args\": [\"$DEST_DIR/kanban_mcp.py\"] }"
-        fi
-    fi
-else
-    echo ""
-    echo "Claude Code config not found at $CLAUDE_CODE_CONFIG (skipping)"
+    echo "Docker not found. Install Docker to use the containerized setup."
+    echo "Without Docker, you need a MySQL server running locally."
 fi
 
 # --- Claude Code hooks (central) ---
@@ -148,9 +133,127 @@ EOF
     echo "Created $CLAUDE_CODE_SETTINGS"
 fi
 
+# --- MCP client configuration snippets ---
+echo ""
+echo "========================================"
+echo "=== MCP Client Configuration ==="
+echo "========================================"
+echo ""
+echo "Add kanban-mcp to your MCP client(s) below."
+echo "The MCP server runs natively (not in Docker) since MCP clients spawn it as a subprocess."
+echo ""
+
+MCP_CMD="$PYTHON"
+MCP_ARG="$DEST_DIR/kanban_mcp.py"
+
+# JSON snippet used by most clients
+json_snippet() {
+    local key="$1"
+    cat <<SNIPPET
+{
+  "$key": {
+    "kanban": {
+      "command": "$MCP_CMD",
+      "args": ["$MCP_ARG"],
+      "env": {
+        "KANBAN_DB_HOST": "localhost",
+        "KANBAN_DB_USER": "kanban",
+        "KANBAN_DB_PASSWORD": "changeme",
+        "KANBAN_DB_NAME": "kanban"
+      }
+    }
+  }
+}
+SNIPPET
+}
+
+# --- Claude Desktop ---
+CLAUDE_DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"
+if [[ -d "$HOME/.config/Claude" ]] || [[ -f "$CLAUDE_DESKTOP_CONFIG" ]]; then
+    echo "--- Claude Desktop ---"
+    echo "File: $CLAUDE_DESKTOP_CONFIG"
+    echo ""
+    json_snippet "mcpServers"
+    echo ""
+fi
+
+# --- Claude Code ---
+CLAUDE_CODE_CONFIG="$HOME/.claude.json"
+if [[ -f "$CLAUDE_CODE_CONFIG" ]] || command -v claude &>/dev/null; then
+    echo "--- Claude Code ---"
+    echo "File: $CLAUDE_CODE_CONFIG"
+    echo ""
+    json_snippet "mcpServers"
+    echo ""
+fi
+
+# --- Gemini CLI ---
+GEMINI_CONFIG="$HOME/.gemini/settings.json"
+if [[ -d "$HOME/.gemini" ]] || command -v gemini &>/dev/null; then
+    echo "--- Gemini CLI ---"
+    echo "File: $GEMINI_CONFIG"
+    echo ""
+    json_snippet "mcpServers"
+    echo ""
+fi
+
+# --- VS Code / Copilot ---
+if command -v code &>/dev/null || command -v codium &>/dev/null; then
+    echo "--- VS Code / Copilot ---"
+    echo "File: .vscode/mcp.json (per-project)"
+    echo ""
+    json_snippet "servers"
+    echo ""
+fi
+
+# --- Codex CLI ---
+CODEX_CONFIG="$HOME/.codex/config.toml"
+if [[ -d "$HOME/.codex" ]] || command -v codex &>/dev/null; then
+    echo "--- Codex CLI ---"
+    echo "File: $CODEX_CONFIG"
+    echo ""
+    cat <<SNIPPET
+[mcp_servers.kanban]
+command = "$MCP_CMD"
+args = ["$MCP_ARG"]
+
+[mcp_servers.kanban.env]
+KANBAN_DB_HOST = "localhost"
+KANBAN_DB_USER = "kanban"
+KANBAN_DB_PASSWORD = "changeme"
+KANBAN_DB_NAME = "kanban"
+SNIPPET
+    echo ""
+fi
+
+# --- LM Studio ---
+LMSTUDIO_CONFIG="$HOME/.lmstudio/mcp.json"
+if [[ -d "$HOME/.lmstudio" ]]; then
+    echo "--- LM Studio ---"
+    echo "File: $LMSTUDIO_CONFIG"
+    echo ""
+    json_snippet "mcpServers"
+    echo ""
+fi
+
+# --- Cherry Studio ---
+if command -v cherry-studio &>/dev/null || [[ -d "$HOME/.config/cherry-studio" ]]; then
+    echo "--- Cherry Studio ---"
+    echo "Add manually in Cherry Studio MCP settings:"
+    echo "  Command: $MCP_CMD"
+    echo "  Args:    $MCP_ARG"
+    echo "  Env:     KANBAN_DB_HOST=localhost KANBAN_DB_USER=kanban KANBAN_DB_PASSWORD=changeme KANBAN_DB_NAME=kanban"
+    echo ""
+fi
+
+echo "========================================"
 echo ""
 echo "=== Deployment complete ==="
 echo ""
-echo "Note: Claude Desktop doesn't support hooks."
+echo "Quick start:"
+echo "  1. cd $DEST_DIR && docker compose up -d"
+echo "  2. Add the MCP snippet above to your client config"
+echo "  3. Visit http://localhost:5000 for the web UI"
+echo ""
 echo "Note: For per-project env var config, add .mcp.json to project with:"
 echo '  "env": { "KANBAN_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}" }'

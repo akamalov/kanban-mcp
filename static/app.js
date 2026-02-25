@@ -1011,13 +1011,6 @@ if (typeof PROJECT_ID !== 'undefined' && PROJECT_ID) {
     loadProjectTags();
 }
 
-// --- Utility: HTML escape for XSS prevention ---
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // --- Modal Functions ---
 function openModal(id) {
     document.getElementById(id).classList.add('open');
@@ -1778,9 +1771,6 @@ if (typeof module !== 'undefined' && module.exports) {
         applyRelationshipFilter,
         updateRelationshipFilterUI,
         clearRelationshipFilter,
-
-        // Utilities
-        escapeHtml,
 
         // Modal functions
         openModal,
