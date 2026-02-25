@@ -7,8 +7,9 @@ from pathlib import Path
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from kanban_mcp import KanbanDB
+from kanban_export import ExportBuilder, export_to_format, get_mime_type, get_file_extension
 
 app = Flask(__name__)
 db = KanbanDB()
@@ -29,7 +30,8 @@ def api_get_item(item_id):
         'priority': item['priority'],
         'complexity': item.get('complexity'),
         'type': item['type_name'],
-        'status': item['status_name']
+        'status': item['status_name'],
+        'parent_id': item.get('parent_id')
     })
 
 
@@ -67,6 +69,12 @@ def api_edit_item(item_id):
         if not result.get('success'):
             return jsonify(result), 400
 
+    # Handle parent_id change separately
+    if 'parent_id' in data:
+        parent_result = db.set_parent(item_id, data['parent_id'] if data['parent_id'] else None)
+        if not parent_result.get('success'):
+            return jsonify(parent_result), 400
+
     return jsonify({'success': True})
 
 
@@ -91,6 +99,110 @@ def api_set_status(item_id):
         return jsonify({'success': False, 'error': str(e)}), 400
 
 
+@app.route('/api/export', methods=['GET'])
+def api_export():
+    """Export project data in various formats.
+
+    Query params:
+        project: Project ID (required)
+        format: Output format - json, yaml, markdown (default: json)
+        type: Filter by item type
+        status: Filter by status
+        ids: Comma-separated item IDs
+        tags: Include tags (default: true)
+        relationships: Include relationships (default: false)
+        metrics: Include metrics (default: false)
+        updates: Include updates (default: false)
+        epic_progress: Include epic progress (default: false)
+        detailed: For markdown, show detailed view (default: false)
+        limit: Max items (default: 500)
+        download: If true, set Content-Disposition header (default: false)
+    """
+    project_id = request.args.get('project', '')
+    if not project_id:
+        return jsonify({'error': 'project parameter required'}), 400
+
+    # Get format
+    format_type = request.args.get('format', 'json').lower()
+    if format_type not in ('json', 'yaml', 'markdown', 'md'):
+        return jsonify({'error': 'Invalid format. Use json, yaml, or markdown'}), 400
+
+    # Parse filter parameters
+    item_type = request.args.get('type', '') or None
+    status = request.args.get('status', '') or None
+
+    # Parse item IDs
+    ids_param = request.args.get('ids', '')
+    item_ids = None
+    if ids_param:
+        try:
+            item_ids = [int(x.strip()) for x in ids_param.split(',') if x.strip()]
+        except ValueError:
+            return jsonify({'error': 'Invalid item IDs'}), 400
+
+    # Parse boolean options
+    def parse_bool(param, default=False):
+        val = request.args.get(param, '').lower()
+        if val in ('true', '1', 'yes'):
+            return True
+        if val in ('false', '0', 'no'):
+            return False
+        return default
+
+    include_tags = parse_bool('tags', True)
+    include_relationships = parse_bool('relationships', False)
+    include_metrics = parse_bool('metrics', False)
+    include_updates = parse_bool('updates', False)
+    include_epic_progress = parse_bool('epic_progress', False)
+    detailed = parse_bool('detailed', False)
+    download = parse_bool('download', False)
+
+    # Parse limit
+    try:
+        limit = int(request.args.get('limit', '500'))
+        limit = max(1, min(limit, 10000))  # Clamp to reasonable range
+    except ValueError:
+        limit = 500
+
+    try:
+        # Build export data
+        builder = ExportBuilder(db, project_id)
+        data = builder.build_export_data(
+            item_ids=item_ids,
+            item_type=item_type,
+            status=status,
+            include_tags=include_tags,
+            include_relationships=include_relationships,
+            include_metrics=include_metrics,
+            include_updates=include_updates,
+            include_epic_progress=include_epic_progress,
+            limit=limit
+        )
+
+        # Format output
+        content = export_to_format(data, format=format_type, detailed=detailed)
+
+        # Build response
+        mime_type = get_mime_type(format_type)
+        response = Response(content, mimetype=mime_type)
+
+        # Set download header if requested
+        if download:
+            project = db.get_project_by_id(project_id)
+            project_name = project['name'] if project else 'export'
+            # Sanitize filename
+            safe_name = ''.join(c for c in project_name if c.isalnum() or c in '-_')[:50]
+            ext = get_file_extension(format_type)
+            response.headers['Content-Disposition'] = f'attachment; filename="{safe_name}{ext}"'
+
+        return response
+
+    except ImportError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/items', methods=['POST'])
 def api_create_item():
     """Create a new item."""
@@ -102,12 +214,13 @@ def api_create_item():
     description = data.get('description', '')
     priority = data.get('priority', 3)
     complexity = data.get('complexity')
+    parent_id = data.get('parent_id')
 
     if not project_id or not item_type or not title:
         return jsonify({'success': False, 'error': 'project_id, type, and title required'}), 400
 
     try:
-        item_id = db.create_item(project_id, item_type, title, description, priority, complexity)
+        item_id = db.create_item(project_id, item_type, title, description, priority, complexity, parent_id=parent_id)
         return jsonify({'success': True, 'item_id': item_id}), 201
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -243,6 +356,46 @@ def api_delete_tag(tag_id):
     return jsonify(result)
 
 
+@app.route('/api/epics', methods=['GET'])
+def api_list_epics():
+    """Get all epics for a project (for parent selector dropdown)."""
+    project_id = request.args.get('project', '')
+    if not project_id:
+        return jsonify({'epics': []})
+
+    items = db.list_items(project_id=project_id, type_name='epic', limit=100)
+    epics = [{'id': item['id'], 'title': item['title'], 'status': item['status_name']} for item in items]
+    return jsonify({'epics': epics})
+
+
+@app.route('/api/items/<int:item_id>/children', methods=['GET'])
+def api_get_item_children(item_id):
+    """Get children of an item."""
+    children = db.get_children(item_id)
+    return jsonify({'children': children})
+
+
+@app.route('/api/search', methods=['GET'])
+def api_search():
+    """Full-text search across items and updates."""
+    project_id = request.args.get('project', '')
+    query = request.args.get('q', '')
+
+    if not project_id:
+        return jsonify({'error': 'project parameter required'}), 400
+    if not query:
+        return jsonify({'items': [], 'updates': [], 'total_count': 0})
+
+    try:
+        limit = int(request.args.get('limit', '20'))
+        limit = max(1, min(limit, 100))
+    except ValueError:
+        limit = 20
+
+    results = db.search(project_id, query, limit)
+    return jsonify(results)
+
+
 @app.route('/api/items/<int:item_id>/tags', methods=['GET'])
 def api_get_item_tags(item_id):
     """Get tags for an item."""
@@ -340,14 +493,16 @@ def index():
     updates_by_item = {}
     relationships = {}
     
+    epic_progress = {}
+
     if current_project:
         with db._get_connection() as conn:
             cursor = conn.cursor(dictionary=True)
-            
+
             # Get items
             cursor.execute("""
                 SELECT i.id, i.title, i.description, i.priority, i.complexity,
-                       t.name as type, s.name as status
+                       i.parent_id, t.name as type, s.name as status
                 FROM items i
                 JOIN item_types t ON i.type_id = t.id
                 JOIN statuses s ON i.status_id = s.id
@@ -384,6 +539,10 @@ def index():
                     items_by_status[status] = []
                 items_by_status[status].append(item)
 
+                # Calculate progress for epic items
+                if item['type'] == 'epic':
+                    epic_progress[item['id']] = db.get_epic_progress(item['id'])
+
             # Get updates with their linked items
             cursor.execute("""
                 SELECT u.id, u.content, u.created_at, ui.item_id
@@ -417,7 +576,8 @@ def index():
         statuses=STATUSES,
         items_by_status=items_by_status,
         updates_by_item=updates_by_item,
-        relationships=relationships
+        relationships=relationships,
+        epic_progress=epic_progress
     )
 
 if __name__ == '__main__':

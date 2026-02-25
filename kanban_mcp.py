@@ -20,6 +20,8 @@ import mysql.connector
 from mysql.connector import Error
 from mysql.connector.pooling import MySQLConnectionPool
 
+from kanban_export import ExportBuilder, export_to_format
+
 
 class KanbanDB:
     """Database operations for kanban system."""
@@ -158,11 +160,20 @@ class KanbanDB:
 
     def create_item(self, project_id: str, type_name: str, title: str,
                     description: str = None, priority: int = 3,
-                    complexity: int = None, status_name: str = None) -> int:
+                    complexity: int = None, status_name: str = None,
+                    parent_id: int = None) -> int:
         """Create a new item. Returns item id."""
         # Validate complexity if provided
         if complexity is not None and (complexity < 1 or complexity > 5):
             raise ValueError(f"Complexity must be 1-5, got {complexity}")
+
+        # Validate parent_id if provided
+        if parent_id is not None:
+            parent = self.get_item(parent_id)
+            if not parent:
+                raise ValueError(f"Parent item not found: {parent_id}")
+            if parent['project_id'] != project_id:
+                raise ValueError("Parent item must be in the same project")
 
         type_id = self.get_type_id(type_name)
 
@@ -173,9 +184,9 @@ class KanbanDB:
 
         with self._db_cursor(commit=True) as cursor:
             cursor.execute(
-                """INSERT INTO items (project_id, type_id, status_id, title, description, priority, complexity)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (project_id, type_id, status_id, title, description, priority, complexity)
+                """INSERT INTO items (project_id, type_id, status_id, title, description, priority, complexity, parent_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (project_id, type_id, status_id, title, description, priority, complexity, parent_id)
             )
             item_id = cursor.lastrowid
 
@@ -194,7 +205,11 @@ class KanbanDB:
                 JOIN projects p ON i.project_id = p.id
                 WHERE i.id = %s
             """, (item_id,))
-            return cursor.fetchone()
+            result = cursor.fetchone()
+            # Ensure parent_id is included (may be NULL)
+            if result and 'parent_id' not in result:
+                result['parent_id'] = None
+            return result
     
     def list_items(self, project_id: str = None, type_name: str = None,
                    status_name: str = None, tag_names: List[str] = None,
@@ -392,18 +407,23 @@ class KanbanDB:
         if target_status_name not in ('done', 'closed'):
             return None
 
+        # Check relationship blockers
         blockers = self.get_blocking_items(item_id)
-        if not blockers:
-            return None
+        if blockers:
+            blocker_info = ", ".join([f"#{b['id']} ({b['reason']})" for b in blockers])
+            return {
+                "success": False,
+                "message": f"Cannot transition to {target_status_name}: blocked by {blocker_info}",
+                "blockers": blockers
+            }
 
-        # Format blocker information
-        blocker_info = ", ".join([f"#{b['id']} ({b['reason']})" for b in blockers])
+        # Check epic closure constraint (only for 'closed' status)
+        if target_status_name == 'closed':
+            epic_block = self._check_epic_closure(item_id)
+            if epic_block:
+                return epic_block
 
-        return {
-            "success": False,
-            "message": f"Cannot transition to {target_status_name}: blocked by {blocker_info}",
-            "blockers": blockers
-        }
+        return None
 
     def advance_status(self, item_id: int) -> Dict:
         """Move item to next status in workflow. Returns new status info."""
@@ -448,6 +468,10 @@ class KanbanDB:
 
         # Record status change in history
         self._record_status_change(item_id, item['status_id'], next_status['status_id'], 'advance')
+
+        # Auto-advance parent epics if this item is now complete
+        if next_status['status_name'] in ('done', 'closed'):
+            self._auto_advance_ancestors(item_id)
 
         return {
             "success": True,
@@ -538,6 +562,10 @@ class KanbanDB:
         # Record status change in history
         self._record_status_change(item_id, item['status_id'], status_id, 'set')
 
+        # Auto-advance parent epics if this item is now complete
+        if status_name in ('done', 'closed'):
+            self._auto_advance_ancestors(item_id)
+
         return {
             "success": True,
             "previous_status": item['status_name'],
@@ -573,6 +601,9 @@ class KanbanDB:
 
         # Record status change in history
         self._record_status_change(item_id, item['status_id'], final_status['id'], 'close')
+
+        # Auto-advance parent epics if this item is now complete
+        self._auto_advance_ancestors(item_id)
 
         return {
             "success": True,
@@ -816,6 +847,182 @@ class KanbanDB:
             """, (item_id, item_id))
             return cursor.fetchall()
 
+    # --- Epic/Hierarchy Methods ---
+
+    def get_all_descendants(self, item_id: int) -> List[Dict]:
+        """Get all descendants of an item recursively using CTE.
+
+        Returns list of dicts with: id, parent_id, status_name, depth
+        Limited to depth 10 to prevent infinite loops.
+        """
+        with self._db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                WITH RECURSIVE descendants AS (
+                    SELECT i.id, i.parent_id, s.name as status_name, 0 as depth
+                    FROM items i
+                    JOIN statuses s ON i.status_id = s.id
+                    WHERE i.parent_id = %s
+                    UNION ALL
+                    SELECT i.id, i.parent_id, s.name as status_name, d.depth + 1
+                    FROM items i
+                    JOIN statuses s ON i.status_id = s.id
+                    JOIN descendants d ON i.parent_id = d.id
+                    WHERE d.depth < 10
+                )
+                SELECT * FROM descendants
+            """, (item_id,))
+            return cursor.fetchall()
+
+    def get_children(self, item_id: int) -> List[Dict]:
+        """Get direct children of an item (not recursive)."""
+        with self._db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                SELECT i.*, it.name as type_name, s.name as status_name
+                FROM items i
+                JOIN item_types it ON i.type_id = it.id
+                JOIN statuses s ON i.status_id = s.id
+                WHERE i.parent_id = %s
+                ORDER BY i.priority, i.id
+            """, (item_id,))
+            return cursor.fetchall()
+
+    def get_epic_progress(self, item_id: int) -> Dict:
+        """Calculate progress stats for an epic (or any parent item).
+
+        Returns dict with:
+            total: Total number of descendants
+            completed: Number of descendants in 'done' or 'closed' status
+            percent: Completion percentage (0-100)
+            incomplete_items: List of incomplete descendant ids
+        """
+        descendants = self.get_all_descendants(item_id)
+
+        total = len(descendants)
+        completed = 0
+        incomplete_items = []
+
+        for d in descendants:
+            if d['status_name'] in ('done', 'closed'):
+                completed += 1
+            else:
+                incomplete_items.append(d['id'])
+
+        percent = round((completed / total * 100) if total > 0 else 0, 1)
+
+        return {
+            'item_id': item_id,
+            'total': total,
+            'completed': completed,
+            'percent': percent,
+            'incomplete_items': incomplete_items
+        }
+
+    def set_parent(self, item_id: int, parent_id: int = None) -> Dict:
+        """Set or remove parent relationship for an item.
+
+        Args:
+            item_id: Item to update
+            parent_id: New parent ID, or None/0 to remove parent
+
+        Returns:
+            Dict with success status
+        """
+        item = self.get_item(item_id)
+        if not item:
+            return {"success": False, "error": f"Item not found: {item_id}"}
+
+        # Convert 0 to None (for MCP tool compatibility)
+        if parent_id == 0:
+            parent_id = None
+
+        if parent_id is not None:
+            # Validate parent exists and is in same project
+            parent = self.get_item(parent_id)
+            if not parent:
+                return {"success": False, "error": f"Parent item not found: {parent_id}"}
+            if parent['project_id'] != item['project_id']:
+                return {"success": False, "error": "Parent must be in the same project"}
+
+            # Check for circular reference
+            if self._would_create_cycle(item_id, parent_id):
+                return {"success": False, "error": "Cannot set parent: would create circular reference"}
+
+        with self._db_cursor(commit=True) as cursor:
+            cursor.execute(
+                "UPDATE items SET parent_id = %s WHERE id = %s",
+                (parent_id, item_id)
+            )
+
+        return {"success": True, "item_id": item_id, "parent_id": parent_id}
+
+    def _would_create_cycle(self, item_id: int, proposed_parent_id: int) -> bool:
+        """Check if setting proposed_parent_id as parent of item_id would create a cycle."""
+        # If proposed parent is the item itself
+        if item_id == proposed_parent_id:
+            return True
+
+        # Check if item_id is an ancestor of proposed_parent_id
+        # (i.e., proposed_parent_id is already a descendant of item_id)
+        descendants = self.get_all_descendants(item_id)
+        descendant_ids = {d['id'] for d in descendants}
+
+        return proposed_parent_id in descendant_ids
+
+    def _check_epic_closure(self, item_id: int) -> Optional[Dict]:
+        """Check if an epic can be closed (all descendants must be complete).
+
+        Returns None if closure is allowed, or error dict if blocked.
+        """
+        item = self.get_item(item_id)
+        if not item:
+            return None
+
+        # Only check for epic items
+        if item['type_name'] != 'epic':
+            return None
+
+        progress = self.get_epic_progress(item_id)
+        if progress['incomplete_items']:
+            incomplete_count = len(progress['incomplete_items'])
+            return {
+                "success": False,
+                "message": f"Cannot close epic: {incomplete_count} incomplete child items",
+                "incomplete_items": progress['incomplete_items']
+            }
+
+        return None
+
+    def _auto_advance_ancestors(self, item_id: int) -> None:
+        """Check parent epics and auto-advance to 'review' if all descendants complete.
+
+        Called after status changes to propagate completion up the hierarchy.
+        """
+        item = self.get_item(item_id)
+        if not item or not item.get('parent_id'):
+            return
+
+        parent = self.get_item(item['parent_id'])
+        if not parent or parent['type_name'] != 'epic':
+            return
+
+        # Check if all descendants are complete
+        progress = self.get_epic_progress(parent['id'])
+        if progress['total'] > 0 and progress['completed'] == progress['total']:
+            # Only auto-advance if not already in review or beyond
+            if parent['status_name'] not in ('review', 'done', 'closed'):
+                # Use internal method to avoid recursion through set_status
+                old_status_id = parent['status_id']
+                new_status_id = self.get_status_id('review')
+                with self._db_cursor(commit=True) as cursor:
+                    cursor.execute(
+                        "UPDATE items SET status_id = %s WHERE id = %s",
+                        (new_status_id, parent['id'])
+                    )
+                self._record_status_change(parent['id'], old_status_id, new_status_id, 'auto_advance')
+
+                # Recurse to check grandparent
+                self._auto_advance_ancestors(parent['id'])
+
     # --- Tag Methods ---
 
     def _normalize_tag_name(self, name: str) -> str:
@@ -1003,6 +1210,84 @@ class KanbanDB:
             """, (item_id,))
             return cursor.fetchall()
 
+    # --- Search Methods ---
+
+    def search(self, project_id: str, query: str, limit: int = 20) -> Dict[str, Any]:
+        """Full-text search across items and updates.
+
+        Args:
+            project_id: Project to search within
+            query: Search query string (use * for wildcard prefix matching)
+            limit: Maximum results per category (default 20)
+
+        Returns:
+            Dict with 'items', 'updates', and 'total_count' keys.
+            Items include: id, title, snippet, score, type_name, status_name
+            Updates include: id, snippet, score, created_at
+        """
+        items = []
+        updates = []
+
+        # Use BOOLEAN MODE if query contains wildcard, otherwise NATURAL LANGUAGE
+        use_boolean = '*' in query
+        mode = 'IN BOOLEAN MODE' if use_boolean else 'IN NATURAL LANGUAGE MODE'
+
+        with self._db_cursor(dictionary=True) as cursor:
+            # Search items (title and description)
+            cursor.execute(f"""
+                SELECT i.id, i.title, i.description,
+                       it.name as type_name, s.name as status_name,
+                       MATCH(i.title, i.description) AGAINST(%s {mode}) as score
+                FROM items i
+                JOIN item_types it ON i.type_id = it.id
+                JOIN statuses s ON i.status_id = s.id
+                WHERE i.project_id = %s
+                  AND MATCH(i.title, i.description) AGAINST(%s {mode})
+                ORDER BY score DESC
+                LIMIT %s
+            """, (query, project_id, query, limit))
+
+            for row in cursor.fetchall():
+                # Create snippet from title or description
+                snippet = row['title']
+                if row['description']:
+                    snippet = row['description'][:100] + ('...' if len(row['description']) > 100 else '')
+
+                items.append({
+                    'id': row['id'],
+                    'title': row['title'],
+                    'snippet': snippet,
+                    'score': float(row['score']),
+                    'type_name': row['type_name'],
+                    'status_name': row['status_name']
+                })
+
+            # Search updates (content)
+            cursor.execute(f"""
+                SELECT u.id, u.content, u.created_at,
+                       MATCH(u.content) AGAINST(%s {mode}) as score
+                FROM updates u
+                WHERE u.project_id = %s
+                  AND MATCH(u.content) AGAINST(%s {mode})
+                ORDER BY score DESC
+                LIMIT %s
+            """, (query, project_id, query, limit))
+
+            for row in cursor.fetchall():
+                snippet = row['content'][:100] + ('...' if len(row['content']) > 100 else '')
+                updates.append({
+                    'id': row['id'],
+                    'snippet': snippet,
+                    'score': float(row['score']),
+                    'created_at': row['created_at']
+                })
+
+        return {
+            'items': items,
+            'updates': updates,
+            'total_count': len(items) + len(updates)
+        }
+
 
 class KanbanMCPServer:
     """MCP Server for Kanban system."""
@@ -1142,8 +1427,8 @@ class KanbanMCPServer:
         @self.tool("new_item")
         def new_item(item_type: str, title: str,
                      description: str = "", priority: int = 3,
-                     complexity: int = 0) -> Dict[str, Any]:
-            """Create a new issue, todo, feature, or diary entry for current project."""
+                     complexity: int = 0, parent_id: int = 0) -> Dict[str, Any]:
+            """Create a new issue, todo, feature, epic, or diary entry for current project."""
             project_id = self._get_project_id()
             item_id = self.db.create_item(
                 project_id=project_id,
@@ -1151,7 +1436,8 @@ class KanbanMCPServer:
                 title=title,
                 description=description if description else None,
                 priority=priority,
-                complexity=complexity if complexity else None
+                complexity=complexity if complexity else None,
+                parent_id=parent_id if parent_id else None
             )
             item = self.db.get_item(item_id)
             return {"success": True, "item": self._serialize_result(item)}
@@ -1213,11 +1499,12 @@ class KanbanMCPServer:
 
         @self.tool("edit_item")
         def edit_item(item_id: int, title: str = "", description: str = "",
-                      priority: int = 0, complexity: int = 0) -> Dict[str, Any]:
-            """Edit an existing item's title, description, priority, and/or complexity.
+                      priority: int = 0, complexity: int = 0, parent_id: int = -1) -> Dict[str, Any]:
+            """Edit an existing item's title, description, priority, complexity, and/or parent.
 
             Note: Empty string/zero means 'don't update this field'. To clear description,
-            use a single space. Complexity 0 means 'don't update'.
+            use a single space. Complexity 0 means 'don't update'. Parent -1 means 'don't update',
+            0 means 'remove parent'.
             """
             # Convert empty/zero to None (MCP passes defaults for unset params)
             # Non-empty values are passed through for update
@@ -1228,6 +1515,15 @@ class KanbanMCPServer:
                 priority=priority if priority else None,
                 complexity=complexity if complexity else None
             )
+
+            # Handle parent_id change separately
+            if parent_id != -1 and result.get('success', True):
+                parent_result = self.db.set_parent(item_id, parent_id if parent_id else None)
+                if not parent_result.get('success'):
+                    return self._serialize_result(parent_result)
+                # Refresh item data
+                result = {"success": True, "item": self.db.get_item(item_id)}
+
             return self._serialize_result(result)
 
         # --- Updates/Progress ---
@@ -1308,6 +1604,29 @@ class KanbanMCPServer:
             blockers = self.db.get_blocking_items(item_id)
             return {"success": True, "blockers": self._serialize_result(blockers), "count": len(blockers)}
 
+        # --- Epic/Hierarchy Tools ---
+
+        @self.tool("get_epic_progress")
+        def get_epic_progress(item_id: int) -> Dict[str, Any]:
+            """Get progress stats for an epic: total, completed, percent, incomplete_items."""
+            progress = self.db.get_epic_progress(item_id)
+            return {"success": True, "progress": self._serialize_result(progress)}
+
+        @self.tool("set_parent")
+        def set_parent(item_id: int, parent_id: int) -> Dict[str, Any]:
+            """Set or remove parent relationship. Use parent_id=0 to remove parent."""
+            result = self.db.set_parent(item_id, parent_id if parent_id else None)
+            return self._serialize_result(result)
+
+        @self.tool("list_children")
+        def list_children(item_id: int, recursive: bool = False) -> Dict[str, Any]:
+            """Get children of an item. Set recursive=True to get all descendants."""
+            if recursive:
+                children = self.db.get_all_descendants(item_id)
+            else:
+                children = self.db.get_children(item_id)
+            return {"success": True, "children": self._serialize_result(children), "count": len(children)}
+
         # --- Tag Tools ---
 
         @self.tool("list_tags")
@@ -1366,6 +1685,117 @@ class KanbanMCPServer:
             if metrics:
                 return {"success": True, "metrics": self._serialize_result(metrics)}
             return {"success": False, "error": "Item not found or no history"}
+
+        # --- Export Tool ---
+
+        @self.tool("export_project")
+        def export_project(
+            format: str = "json",
+            item_type: str = "",
+            status: str = "",
+            item_ids: str = "",
+            include_tags: bool = True,
+            include_relationships: bool = False,
+            include_metrics: bool = False,
+            include_updates: bool = False,
+            include_epic_progress: bool = False,
+            detailed: bool = False,
+            limit: int = 500
+        ) -> Dict[str, Any]:
+            """Export project data in JSON, YAML, or Markdown format.
+
+            Args:
+                format: Output format - 'json', 'yaml', or 'markdown'
+                item_type: Filter by type (issue, feature, epic, todo, diary)
+                status: Filter by status (backlog, todo, in_progress, review, done, closed)
+                item_ids: Comma-separated item IDs to export (overrides type/status filters)
+                include_tags: Include tag data for each item (default: True)
+                include_relationships: Include relationship data
+                include_metrics: Include calculated metrics (lead_time, cycle_time, etc.)
+                include_updates: Include project updates
+                include_epic_progress: Include epic progress stats
+                detailed: For markdown, show detailed item info instead of tables
+                limit: Maximum items to export (default: 500)
+
+            Returns:
+                Dict with success, format, content, and item_count
+            """
+            from kanban_export import get_file_extension
+            import tempfile
+
+            project_id = self._get_project_id()
+
+            # Parse item_ids if provided
+            parsed_item_ids = None
+            if item_ids:
+                parsed_item_ids = [int(x.strip()) for x in item_ids.split(',') if x.strip()]
+
+            try:
+                # Build export data
+                builder = ExportBuilder(self.db, project_id)
+                data = builder.build_export_data(
+                    item_ids=parsed_item_ids,
+                    item_type=item_type if item_type else None,
+                    status=status if status else None,
+                    include_tags=include_tags,
+                    include_relationships=include_relationships,
+                    include_metrics=include_metrics,
+                    include_updates=include_updates,
+                    include_epic_progress=include_epic_progress,
+                    limit=limit
+                )
+
+                # Format output
+                content = export_to_format(data, format=format, detailed=detailed)
+
+                # Write to temp file
+                project = self.db.get_project_by_id(project_id)
+                project_name = project['name'] if project else 'export'
+                safe_name = ''.join(c for c in project_name if c.isalnum() or c in '-_')[:50]
+                ext = get_file_extension(format)
+
+                with tempfile.NamedTemporaryFile(
+                    mode='w',
+                    prefix=f'{safe_name}_',
+                    suffix=ext,
+                    delete=False,
+                    encoding='utf-8'
+                ) as f:
+                    f.write(content)
+                    file_path = f.name
+
+                return {
+                    "success": True,
+                    "format": format,
+                    "file_path": file_path,
+                    "item_count": len(data.get("items", []))
+                }
+            except ImportError as e:
+                return {"success": False, "error": str(e)}
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+
+        # --- Search Tool ---
+
+        @self.tool("search")
+        def search(query: str, limit: int = 20) -> Dict[str, Any]:
+            """Full-text search across items and updates in current project.
+
+            Args:
+                query: Search query string
+                limit: Maximum results per category (default 20)
+
+            Returns:
+                Dict with items, updates, and total_count
+            """
+            project_id = self._get_project_id()
+            results = self.db.search(project_id, query, limit)
+            return {
+                "success": True,
+                "items": self._serialize_result(results['items']),
+                "updates": self._serialize_result(results['updates']),
+                "total_count": results['total_count']
+            }
 
     async def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Handle MCP JSON-RPC request."""

@@ -64,6 +64,7 @@
                 <div class="card {{ item.type }}{% if is_blocked %} blocked{% endif %}"
                      data-item-id="{{ item.id }}"
                      data-item-type="{{ item.type }}"
+                     data-parent-id="{{ item.parent_id or '' }}"
                      data-blocked="{{ 'true' if is_blocked else 'false' }}"
                      draggable="{{ 'false' if is_blocked else 'true' }}"
                      ondragstart="handleDragStart(event)"
@@ -88,6 +89,31 @@
                             {{ tag.name }}
                         </span>
                         {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    {% if item.type == 'epic' and epic_progress.get(item.id) %}
+                    {% set prog = epic_progress[item.id] %}
+                    <div class="epic-progress" onclick="event.stopPropagation(); filterByEpic({{ item.id }})" style="cursor: pointer;" title="Click to show children">
+                        <span class="badge badge-epic">
+                            <i class="material-icons">account_tree</i>
+                            {{ prog.completed }}/{{ prog.total }}
+                        </span>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar-fill" style="width: {{ prog.percent }}%"></div>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if item.parent_id %}
+                    <div class="badges-container">
+                        <span class="badge badge-parent"
+                              style="cursor: pointer;"
+                              title="Click to view parent epic"
+                              onclick="event.stopPropagation(); openEditModal({{ item.parent_id }})">
+                            <i class="material-icons">subdirectory_arrow_right</i>
+                            Part of: #{{ item.parent_id }}
+                        </span>
                     </div>
                     {% endif %}
 
@@ -136,6 +162,8 @@
                             <i class="material-icons" style="font-size:14px; margin-right:4px;">task_alt</i>
                             {% elif item.type == 'diary' %}
                             <i class="material-icons" style="font-size:14px; margin-right:4px;">book</i>
+                            {% elif item.type == 'epic' %}
+                            <i class="material-icons" style="font-size:14px; margin-right:4px;">account_tree</i>
                             {% endif %}
                             {{ item.type }}
                         </span>
@@ -154,6 +182,12 @@
 
     <!-- FAB Buttons -->
     <div class="fab-container">
+        <button class="fab small" onclick="openSearchModal()" title="Search">
+            <i class="material-icons">search</i>
+        </button>
+        <button class="fab small" onclick="openExportModal()" title="Export Data">
+            <i class="material-icons">download</i>
+        </button>
         <button class="fab small" onclick="openNewItemModal()" title="New Item">
             <i class="material-icons">add_task</i>
         </button>
@@ -264,6 +298,19 @@
                     <input type="text" class="form-input" id="edit-type" disabled style="opacity: 0.6;">
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Parent Epic</label>
+                    <select class="form-select" id="edit-parent">
+                        <option value="">No parent</option>
+                    </select>
+                </div>
+                <div class="form-group" id="edit-children-section" style="display: none;">
+                    <label class="form-label">
+                        <i class="material-icons" style="font-size:14px; vertical-align:middle;">account_tree</i>
+                        Child Items
+                    </label>
+                    <div id="edit-children-list" class="children-list"></div>
+                </div>
+                <div class="form-group">
                     <label class="form-label">Tags</label>
                     <div class="tag-input-wrapper">
                         <input type="text" class="tag-input" id="edit-tags-input" placeholder="Add tags (press Enter)...">
@@ -322,6 +369,7 @@
                     <select class="form-select" id="newitem-type">
                         <option value="issue">Issue</option>
                         <option value="feature">Feature</option>
+                        <option value="epic">Epic</option>
                         <option value="todo">Todo</option>
                         <option value="diary">Diary</option>
                     </select>
@@ -329,6 +377,12 @@
                 <div class="form-group">
                     <label class="form-label">Title</label>
                     <input type="text" class="form-input" id="newitem-title" placeholder="Enter title...">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Parent Epic (optional)</label>
+                    <select class="form-select" id="newitem-parent">
+                        <option value="">No parent</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Description</label>
@@ -380,6 +434,112 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('delete-modal')">Cancel</button>
                 <button class="btn btn-danger" onclick="deleteProject()">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Modal -->
+    <div class="modal-overlay" id="export-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title">Export Project Data</span>
+                <button class="close-btn" onclick="closeModal('export-modal')">
+                    <i class="material-icons">close</i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Format</label>
+                    <select class="form-select" id="export-format">
+                        <option value="json">JSON</option>
+                        <option value="yaml">YAML</option>
+                        <option value="markdown">Markdown</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Filter by Type (optional)</label>
+                    <select class="form-select" id="export-type">
+                        <option value="">All Types</option>
+                        <option value="epic">Epic</option>
+                        <option value="feature">Feature</option>
+                        <option value="issue">Issue</option>
+                        <option value="todo">Todo</option>
+                        <option value="diary">Diary</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Filter by Status (optional)</label>
+                    <select class="form-select" id="export-status">
+                        <option value="">All Statuses</option>
+                        <option value="backlog">Backlog</option>
+                        <option value="todo">Todo</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="review">Review</option>
+                        <option value="done">Done</option>
+                        <option value="closed">Closed</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Include Options</label>
+                    <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-tags" checked>
+                            <span>Tags</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-relationships">
+                            <span>Relationships</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-metrics">
+                            <span>Metrics (lead time, cycle time)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-updates">
+                            <span>Project Updates</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-epic-progress">
+                            <span>Epic Progress</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="export-detailed">
+                            <span>Detailed view (Markdown only)</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Max Items</label>
+                    <input type="number" class="form-input" id="export-limit" value="500" min="1" max="10000">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('export-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="doExport()">
+                    <i class="material-icons" style="font-size: 18px; margin-right: 4px;">download</i>
+                    Export
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search Modal -->
+    <div class="modal-overlay" id="search-modal">
+        <div class="modal" style="max-width: 600px;">
+            <div class="modal-header">
+                <span class="modal-title">Search</span>
+                <button class="close-btn" onclick="closeModal('search-modal')">
+                    <i class="material-icons">close</i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <div class="search-input-wrapper" style="padding: 0; border: none;">
+                        <i class="material-icons" style="left: 12px;">search</i>
+                        <input type="text" class="search-input" id="search-query" placeholder="Search items and updates..." onkeydown="if(event.key==='Enter')doSearch()">
+                    </div>
+                </div>
+                <div id="search-results"></div>
             </div>
         </div>
     </div>

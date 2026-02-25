@@ -19,6 +19,9 @@ let activeTagFilters = [];
 let tagFilterMode = 'any';
 let currentEditItemId = null;
 
+// --- Epic Filter State ---
+let activeEpicFilter = null;
+
 // Load project tags on page load
 async function loadProjectTags() {
     if (!PROJECT_ID) return;
@@ -122,7 +125,80 @@ function setTagFilterMode(mode) {
 // Clear all tag filters
 function clearTagFilters() {
     activeTagFilters = [];
+    activeEpicFilter = null;
     applyTagFilters();
+    applyEpicFilter();
+}
+
+// --- Epic Filter Functions ---
+function filterByEpic(epicId) {
+    activeEpicFilter = epicId;
+    applyEpicFilter();
+}
+
+function applyEpicFilter() {
+    const cards = document.querySelectorAll('.card');
+    const filterBar = document.getElementById('tag-filter-bar');
+
+    if (activeEpicFilter === null) {
+        // If no tag filters either, show all cards
+        if (activeTagFilters.length === 0) {
+            cards.forEach(card => card.style.display = '');
+        }
+        updateEpicFilterUI();
+        return;
+    }
+
+    // Show filter bar when filtering by epic
+    if (filterBar) filterBar.style.display = 'flex';
+
+    cards.forEach(card => {
+        const parentId = card.dataset.parentId;
+        const matches = parentId === String(activeEpicFilter);
+        card.style.display = matches ? '' : 'none';
+    });
+
+    updateEpicFilterUI();
+}
+
+function updateEpicFilterUI() {
+    const activeDisplay = document.getElementById('active-filters');
+    if (!activeDisplay) return;
+
+    // If epic filter is active, show it
+    if (activeEpicFilter !== null) {
+        activeDisplay.textContent = '';
+        const badge = document.createElement('span');
+        badge.className = 'tag-badge epic-filter-badge';
+        badge.style.cssText = 'background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4);';
+        badge.onclick = () => clearEpicFilter();
+        badge.textContent = `Showing children of: Epic #${activeEpicFilter} `;
+        const icon = document.createElement('i');
+        icon.className = 'material-icons';
+        icon.style.fontSize = '12px';
+        icon.textContent = 'close';
+        badge.appendChild(icon);
+        activeDisplay.appendChild(badge);
+    }
+}
+
+function clearEpicFilter() {
+    activeEpicFilter = null;
+    applyEpicFilter();
+    // Re-apply tag filters if any
+    if (activeTagFilters.length > 0) {
+        applyTagFilters();
+    } else {
+        // Show default hint
+        const activeDisplay = document.getElementById('active-filters');
+        if (activeDisplay) {
+            activeDisplay.textContent = '';
+            const span = document.createElement('span');
+            span.style.color = 'var(--text-disabled)';
+            span.textContent = 'Click tags on cards to filter';
+            activeDisplay.appendChild(span);
+        }
+    }
 }
 
 // --- Tag Input Autocomplete ---
@@ -291,6 +367,65 @@ async function loadItemTags(itemId) {
     }
 }
 
+// Load and display children for an item in the edit modal
+async function loadItemChildren(itemId) {
+    const section = document.getElementById('edit-children-section');
+    const container = document.getElementById('edit-children-list');
+    if (!section || !container) return;
+
+    try {
+        const res = await fetch(`/api/items/${itemId}/children`);
+        const data = await res.json();
+        const children = data.children || [];
+
+        if (children.length === 0) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+        container.textContent = '';
+
+        children.forEach(child => {
+            const row = document.createElement('div');
+            row.className = 'child-item';
+            row.onclick = () => {
+                closeModal('edit-modal');
+                setTimeout(() => openEditModal(child.id), 100);
+            };
+
+            // Item ID
+            const idSpan = document.createElement('span');
+            idSpan.className = 'child-item-id';
+            idSpan.textContent = '#' + child.id;
+            row.appendChild(idSpan);
+
+            // Title
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'child-item-title';
+            titleSpan.textContent = child.title;
+            row.appendChild(titleSpan);
+
+            // Type badge
+            const typeBadge = document.createElement('span');
+            typeBadge.className = 'child-item-type type-' + child.type_name;
+            typeBadge.textContent = child.type_name;
+            row.appendChild(typeBadge);
+
+            // Status badge
+            const statusBadge = document.createElement('span');
+            statusBadge.className = 'child-item-status status-' + child.status_name;
+            statusBadge.textContent = child.status_name;
+            row.appendChild(statusBadge);
+
+            container.appendChild(row);
+        });
+    } catch (err) {
+        section.style.display = 'none';
+        console.error('Failed to load children', err);
+    }
+}
+
 // Initialize on page load
 if (typeof PROJECT_ID !== 'undefined' && PROJECT_ID) {
     loadProjectTags();
@@ -358,9 +493,19 @@ async function openEditModal(itemId) {
         document.getElementById('edit-status').value = item.status;
         document.getElementById('edit-type').value = item.type;
 
+        // Load parent dropdown (exclude current item to prevent circular reference)
+        await loadEpicsForDropdown('edit-parent', item.parent_id, itemId);
+
         // Load tags for this item
         await loadItemTags(itemId);
         setupTagInput('edit-tags-input', 'edit-tags-suggestions');
+
+        // Load children for epics
+        if (item.type === 'epic') {
+            await loadItemChildren(itemId);
+        } else {
+            document.getElementById('edit-children-section').style.display = 'none';
+        }
 
         openModal('edit-modal');
     } catch (err) {
@@ -371,12 +516,14 @@ async function openEditModal(itemId) {
 async function saveItem() {
     const itemId = document.getElementById('edit-id').value;
     const complexityVal = document.getElementById('edit-complexity').value;
+    const parentVal = document.getElementById('edit-parent').value;
     const data = {
         title: document.getElementById('edit-title').value,
         description: document.getElementById('edit-description').value,
         priority: parseInt(document.getElementById('edit-priority').value),
         complexity: complexityVal ? parseInt(complexityVal) : null,
-        status: document.getElementById('edit-status').value
+        status: document.getElementById('edit-status').value,
+        parent_id: parentVal ? parseInt(parentVal) : null
     };
 
     try {
@@ -456,13 +603,40 @@ async function createUpdate() {
     }
 }
 
+// --- Load Epics for Parent Dropdown ---
+async function loadEpicsForDropdown(selectId, currentParentId = null, excludeItemId = null) {
+    if (!PROJECT_ID) return;
+    try {
+        const res = await fetch(`/api/epics?project=${PROJECT_ID}`);
+        const data = await res.json();
+        const select = document.getElementById(selectId);
+        // Clear existing options except first
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+        // Add epic options
+        (data.epics || []).forEach(epic => {
+            if (excludeItemId && epic.id == excludeItemId) return; // Don't allow item to be its own parent
+            const option = document.createElement('option');
+            option.value = epic.id;
+            option.textContent = `#${epic.id} ${epic.title} (${epic.status})`;
+            if (currentParentId && epic.id == currentParentId) option.selected = true;
+            select.appendChild(option);
+        });
+    } catch (err) {
+        console.error('Failed to load epics', err);
+    }
+}
+
 // --- Create Item ---
-function openNewItemModal() {
+async function openNewItemModal() {
     document.getElementById('newitem-title').value = '';
     document.getElementById('newitem-description').value = '';
     document.getElementById('newitem-type').value = 'issue';
     document.getElementById('newitem-priority').value = '3';
     document.getElementById('newitem-complexity').value = '';
+    document.getElementById('newitem-parent').value = '';
+    await loadEpicsForDropdown('newitem-parent');
     openModal('newitem-modal');
 }
 
@@ -474,13 +648,15 @@ async function createItem() {
     }
 
     const complexityVal = document.getElementById('newitem-complexity').value;
+    const parentVal = document.getElementById('newitem-parent').value;
     const data = {
         project_id: PROJECT_ID,
         type: document.getElementById('newitem-type').value,
         title: title,
         description: document.getElementById('newitem-description').value,
         priority: parseInt(document.getElementById('newitem-priority').value),
-        complexity: complexityVal ? parseInt(complexityVal) : null
+        complexity: complexityVal ? parseInt(complexityVal) : null,
+        parent_id: parentVal ? parseInt(parentVal) : null
     };
 
     try {
@@ -566,6 +742,219 @@ async function handleDropWrapper(e) {
     }
 }
 
+// --- Export Functions ---
+function openExportModal() {
+    // Reset form to defaults
+    document.getElementById('export-format').value = 'json';
+    document.getElementById('export-type').value = '';
+    document.getElementById('export-status').value = '';
+    document.getElementById('export-tags').checked = true;
+    document.getElementById('export-relationships').checked = false;
+    document.getElementById('export-metrics').checked = false;
+    document.getElementById('export-updates').checked = false;
+    document.getElementById('export-epic-progress').checked = false;
+    document.getElementById('export-detailed').checked = false;
+    document.getElementById('export-limit').value = '500';
+    openModal('export-modal');
+}
+
+async function doExport() {
+    if (!PROJECT_ID) {
+        showToast('No project selected', 'error');
+        return;
+    }
+
+    // Build query parameters
+    const params = new URLSearchParams();
+    params.set('project', PROJECT_ID);
+    params.set('format', document.getElementById('export-format').value);
+    params.set('download', 'true');
+
+    // Add filters
+    const itemType = document.getElementById('export-type').value;
+    if (itemType) params.set('type', itemType);
+
+    const status = document.getElementById('export-status').value;
+    if (status) params.set('status', status);
+
+    // Add include options
+    params.set('tags', document.getElementById('export-tags').checked);
+    params.set('relationships', document.getElementById('export-relationships').checked);
+    params.set('metrics', document.getElementById('export-metrics').checked);
+    params.set('updates', document.getElementById('export-updates').checked);
+    params.set('epic_progress', document.getElementById('export-epic-progress').checked);
+    params.set('detailed', document.getElementById('export-detailed').checked);
+
+    // Add limit
+    const limit = parseInt(document.getElementById('export-limit').value) || 500;
+    params.set('limit', Math.max(1, Math.min(limit, 10000)));
+
+    try {
+        // Trigger download
+        const url = `/api/export?${params.toString()}`;
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Export failed');
+        }
+
+        // Get filename from Content-Disposition header
+        const disposition = response.headers.get('Content-Disposition');
+        let filename = 'export';
+        if (disposition) {
+            const match = disposition.match(/filename="?([^"]+)"?/);
+            if (match) filename = match[1];
+        }
+
+        // Download the file
+        const blob = await response.blob();
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(downloadUrl);
+
+        closeModal('export-modal');
+        showToast('Export downloaded');
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+// --- Search Functions ---
+function openSearchModal() {
+    document.getElementById('search-query').value = '';
+    document.getElementById('search-results').textContent = '';
+    openModal('search-modal');
+    // Focus the search input
+    setTimeout(() => document.getElementById('search-query').focus(), 100);
+}
+
+async function doSearch() {
+    const query = document.getElementById('search-query').value.trim();
+    const resultsDiv = document.getElementById('search-results');
+
+    if (!query) {
+        resultsDiv.textContent = '';
+        return;
+    }
+
+    if (!PROJECT_ID) {
+        showToast('No project selected', 'error');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/search?project=${PROJECT_ID}&q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+            throw new Error(data.error || 'Search failed');
+        }
+
+        renderSearchResults(data, resultsDiv);
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+function renderSearchResults(data, container) {
+    container.textContent = '';
+
+    if (data.total_count === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No results found';
+        container.appendChild(empty);
+        return;
+    }
+
+    // Items section
+    if (data.items && data.items.length > 0) {
+        const section = document.createElement('div');
+        section.className = 'search-section';
+
+        const header = document.createElement('div');
+        header.className = 'search-section-header';
+        header.textContent = `Items (${data.items.length})`;
+        section.appendChild(header);
+
+        data.items.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'search-result-item';
+            row.onclick = () => {
+                closeModal('search-modal');
+                openEditModal(item.id);
+            };
+
+            const idSpan = document.createElement('span');
+            idSpan.className = 'search-result-id';
+            idSpan.textContent = '#' + item.id;
+            row.appendChild(idSpan);
+
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'search-result-title';
+            titleSpan.textContent = item.title;
+            row.appendChild(titleSpan);
+
+            const typeBadge = document.createElement('span');
+            typeBadge.className = 'search-result-type type-' + item.type_name;
+            typeBadge.textContent = item.type_name;
+            row.appendChild(typeBadge);
+
+            const statusBadge = document.createElement('span');
+            statusBadge.className = 'search-result-status status-' + item.status_name;
+            statusBadge.textContent = item.status_name;
+            row.appendChild(statusBadge);
+
+            if (item.snippet) {
+                const snippet = document.createElement('div');
+                snippet.className = 'search-result-snippet';
+                snippet.textContent = item.snippet;
+                row.appendChild(snippet);
+            }
+
+            section.appendChild(row);
+        });
+
+        container.appendChild(section);
+    }
+
+    // Updates section
+    if (data.updates && data.updates.length > 0) {
+        const section = document.createElement('div');
+        section.className = 'search-section';
+
+        const header = document.createElement('div');
+        header.className = 'search-section-header';
+        header.textContent = `Updates (${data.updates.length})`;
+        section.appendChild(header);
+
+        data.updates.forEach(update => {
+            const row = document.createElement('div');
+            row.className = 'search-result-update';
+
+            const meta = document.createElement('div');
+            meta.className = 'search-result-meta';
+            meta.textContent = update.created_at ? new Date(update.created_at).toLocaleString() : '';
+            row.appendChild(meta);
+
+            const snippet = document.createElement('div');
+            snippet.className = 'search-result-snippet';
+            snippet.textContent = update.snippet || '';
+            row.appendChild(snippet);
+
+            section.appendChild(row);
+        });
+
+        container.appendChild(section);
+    }
+}
+
 // Export for testing (CommonJS for Jest compatibility)
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -578,7 +967,9 @@ if (typeof module !== 'undefined' && module.exports) {
         setTagFilterMode,
         getCurrentEditItemId: () => currentEditItemId,
         setCurrentEditItemId: (id) => { currentEditItemId = id; },
-        
+        getActiveEpicFilter: () => activeEpicFilter,
+        setActiveEpicFilter: (filter) => { activeEpicFilter = filter; },
+
         // Tag management
         loadProjectTags,
         toggleTagFilter,
@@ -590,17 +981,25 @@ if (typeof module !== 'undefined' && module.exports) {
         addTagToCurrentItem,
         removeTagFromCurrentItem,
         loadItemTags,
-        
+
+        // Epic/hierarchy
+        loadEpicsForDropdown,
+        loadItemChildren,
+        filterByEpic,
+        applyEpicFilter,
+        updateEpicFilterUI,
+        clearEpicFilter,
+
         // Utilities
         escapeHtml,
-        
+
         // Modal functions
         openModal,
         closeModal,
-        
+
         // Toast
         showToast,
-        
+
         // Item operations
         openEditModal,
         saveItem,
@@ -608,15 +1007,24 @@ if (typeof module !== 'undefined' && module.exports) {
         createUpdate,
         openNewItemModal,
         createItem,
-        
+
         // Project operations
         confirmDeleteProject,
         deleteProject,
-        
+
         // Filter
         filterUpdates,
-        
+
         // Drag and drop
-        handleDropWrapper
+        handleDropWrapper,
+
+        // Export
+        openExportModal,
+        doExport,
+
+        // Search
+        openSearchModal,
+        doSearch,
+        renderSearchResults
     };
 }

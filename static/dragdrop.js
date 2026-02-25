@@ -7,6 +7,7 @@
 const TYPE_STATUSES = {
     'issue': ['backlog', 'todo', 'in_progress', 'review', 'done', 'closed'],
     'feature': ['backlog', 'todo', 'in_progress', 'review', 'done', 'closed'],
+    'epic': ['backlog', 'todo', 'in_progress', 'review', 'done', 'closed'],
     'todo': ['backlog', 'todo', 'in_progress', 'done'],
     'diary': ['done']
 };

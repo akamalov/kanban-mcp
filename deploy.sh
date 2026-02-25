@@ -10,20 +10,29 @@ echo "Source: $SRC_DIR"
 echo "Destination: $DEST_DIR"
 
 # Create destination
-mkdir -p "$DEST_DIR/hooks"
+mkdir -p "$DEST_DIR/hooks" "$DEST_DIR/templates" "$DEST_DIR/static"
 
-# Rsync executables only
+# Rsync executables and web UI
 rsync -av --delete \
     --include='kanban_mcp.py' \
     --include='kanban_cli.py' \
+    --include='kanban_web.py' \
+    --include='kanban_export.py' \
     --include='hooks/' \
     --include='hooks/*.py' \
+    --include='templates/' \
+    --include='templates/*.html' \
+    --include='static/' \
+    --include='static/*.css' \
+    --include='static/*.js' \
     --exclude='*' \
     "$SRC_DIR/" "$DEST_DIR/"
 
 echo "Files deployed:"
 ls -la "$DEST_DIR"
 ls -la "$DEST_DIR/hooks"
+ls -la "$DEST_DIR/templates"
+ls -la "$DEST_DIR/static"
 
 # --- Claude Desktop config ---
 CLAUDE_DESKTOP_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"

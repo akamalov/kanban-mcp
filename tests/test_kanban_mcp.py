@@ -1932,5 +1932,768 @@ class TestTagMCPTools(unittest.TestCase):
         self.assertEqual(result['items'][0]['title'], "Test Feature")
 
 
+class TestEpicSupport(unittest.TestCase):
+    """Tests for epic item type and parent-child hierarchy."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+        cls.test_project_path = "/tmp/test-epic-support"
+        cls.test_project_id = cls.db.hash_project_path(cls.test_project_path)
+
+    def setUp(self):
+        from kanban_mcp import KanbanDB
+        self.db = KanbanDB()
+        cleanup_test_project(self.db, self.test_project_path)
+        self.db.ensure_project(self.test_project_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_project_path)
+
+    # --- Epic Type Tests ---
+
+    def test_create_epic_default_status(self):
+        """Epic should start in backlog status."""
+        item_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Test Epic"
+        )
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['type_name'], 'epic')
+        self.assertEqual(item['status_name'], 'backlog')
+
+    def test_epic_workflow_matches_issue(self):
+        """Epic should have same workflow as issue: backlog->todo->in_progress->review->done->closed."""
+        item_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Test Epic"
+        )
+
+        # Advance through all statuses
+        self.db.advance_status(item_id)  # backlog -> todo
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['status_name'], 'todo')
+
+        self.db.advance_status(item_id)  # todo -> in_progress
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['status_name'], 'in_progress')
+
+        self.db.advance_status(item_id)  # in_progress -> review
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['status_name'], 'review')
+
+        self.db.advance_status(item_id)  # review -> done
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['status_name'], 'done')
+
+        self.db.advance_status(item_id)  # done -> closed
+        item = self.db.get_item(item_id)
+        self.assertEqual(item['status_name'], 'closed')
+
+    # --- Parent/Child Hierarchy Tests ---
+
+    def test_create_item_with_parent(self):
+        """Items can be created with a parent_id."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Parent Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Child Feature",
+            parent_id=epic_id
+        )
+
+        child = self.db.get_item(child_id)
+        self.assertEqual(child['parent_id'], epic_id)
+
+    def test_create_item_invalid_parent_fails(self):
+        """Creating item with non-existent parent should fail."""
+        with self.assertRaises(ValueError):
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="issue",
+                title="Orphan",
+                parent_id=99999
+            )
+
+    def test_create_item_parent_different_project_fails(self):
+        """Creating item with parent from different project should fail."""
+        # Create parent in different project
+        other_project_path = "/tmp/test-epic-support-other"
+        other_project_id = self.db.hash_project_path(other_project_path)
+        self.db.ensure_project(other_project_path)
+
+        try:
+            other_epic_id = self.db.create_item(
+                project_id=other_project_id,
+                type_name="epic",
+                title="Other Project Epic"
+            )
+
+            # Try to create child in different project
+            with self.assertRaises(ValueError):
+                self.db.create_item(
+                    project_id=self.test_project_id,
+                    type_name="issue",
+                    title="Cross-project child",
+                    parent_id=other_epic_id
+                )
+        finally:
+            cleanup_test_project(self.db, other_project_path)
+
+    def test_get_item_includes_parent_id(self):
+        """get_item should include parent_id in result."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="todo",
+            title="Child",
+            parent_id=epic_id
+        )
+
+        child = self.db.get_item(child_id)
+        self.assertIn('parent_id', child)
+        self.assertEqual(child['parent_id'], epic_id)
+
+        epic = self.db.get_item(epic_id)
+        self.assertIn('parent_id', epic)
+        self.assertIsNone(epic['parent_id'])
+
+    # --- Descendants and Progress Tests ---
+
+    def test_get_children(self):
+        """get_children should return direct children."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Epic"
+        )
+        child1_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Child 1",
+            parent_id=epic_id
+        )
+        child2_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Child 2",
+            parent_id=epic_id
+        )
+
+        children = self.db.get_children(epic_id)
+        self.assertEqual(len(children), 2)
+        child_ids = [c['id'] for c in children]
+        self.assertIn(child1_id, child_ids)
+        self.assertIn(child2_id, child_ids)
+
+    def test_get_all_descendants_recursive(self):
+        """get_all_descendants should return all nested descendants."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Root Epic"
+        )
+        sub_epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Sub Epic",
+            parent_id=epic_id
+        )
+        grandchild_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Grandchild Issue",
+            parent_id=sub_epic_id
+        )
+
+        descendants = self.db.get_all_descendants(epic_id)
+        self.assertEqual(len(descendants), 2)
+        descendant_ids = [d['id'] for d in descendants]
+        self.assertIn(sub_epic_id, descendant_ids)
+        self.assertIn(grandchild_id, descendant_ids)
+
+    def test_get_epic_progress_empty(self):
+        """Epic with no children should have 0/0 progress."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Empty Epic"
+        )
+
+        progress = self.db.get_epic_progress(epic_id)
+        self.assertEqual(progress['total'], 0)
+        self.assertEqual(progress['completed'], 0)
+        self.assertEqual(progress['percent'], 0)
+
+    def test_get_epic_progress_partial(self):
+        """Epic progress should reflect partial completion."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Partial Epic"
+        )
+        child1_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Completed Issue",
+            parent_id=epic_id
+        )
+        child2_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Incomplete Issue",
+            parent_id=epic_id
+        )
+
+        # Complete one child
+        self.db.set_status(child1_id, "done")
+
+        progress = self.db.get_epic_progress(epic_id)
+        self.assertEqual(progress['total'], 2)
+        self.assertEqual(progress['completed'], 1)
+        self.assertEqual(progress['percent'], 50.0)
+        self.assertIn(child2_id, progress['incomplete_items'])
+
+    def test_get_epic_progress_complete(self):
+        """Epic progress should show 100% when all children done/closed."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Complete Epic"
+        )
+        child1_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Done Issue",
+            parent_id=epic_id
+        )
+        child2_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Closed Issue",
+            parent_id=epic_id
+        )
+
+        # Complete both children (done and closed both count)
+        self.db.set_status(child1_id, "done")
+        self.db.close_item(child2_id)
+
+        progress = self.db.get_epic_progress(epic_id)
+        self.assertEqual(progress['total'], 2)
+        self.assertEqual(progress['completed'], 2)
+        self.assertEqual(progress['percent'], 100.0)
+        self.assertEqual(progress['incomplete_items'], [])
+
+    def test_get_epic_progress_recursive(self):
+        """Epic progress should include nested descendants."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Root Epic"
+        )
+        sub_epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Sub Epic",
+            parent_id=epic_id
+        )
+        grandchild_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Grandchild",
+            parent_id=sub_epic_id
+        )
+
+        # Complete grandchild
+        self.db.set_status(grandchild_id, "done")
+
+        # Root epic should show 1/2 (sub-epic not done, grandchild done)
+        progress = self.db.get_epic_progress(epic_id)
+        self.assertEqual(progress['total'], 2)
+        self.assertEqual(progress['completed'], 1)
+
+    # --- Auto-Advance Tests ---
+
+    def test_auto_advance_epic_to_review(self):
+        """Epic should auto-advance to 'review' when all children complete."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Auto-advance Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Only Child",
+            parent_id=epic_id
+        )
+
+        # Move epic to in_progress
+        self.db.set_status(epic_id, "in_progress")
+
+        # Complete the child
+        self.db.set_status(child_id, "done")
+
+        # Epic should auto-advance to review
+        epic = self.db.get_item(epic_id)
+        self.assertEqual(epic['status_name'], 'review')
+
+    def test_auto_advance_only_affects_epic_type(self):
+        """Auto-advance should only affect epic type parents."""
+        # Feature as parent (not epic)
+        feature_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Parent Feature"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Child Issue",
+            parent_id=feature_id
+        )
+
+        # Move feature to in_progress
+        self.db.set_status(feature_id, "in_progress")
+
+        # Complete child
+        self.db.set_status(child_id, "done")
+
+        # Feature should NOT auto-advance (only epics do)
+        feature = self.db.get_item(feature_id)
+        self.assertEqual(feature['status_name'], 'in_progress')
+
+    def test_no_auto_advance_if_already_review_or_beyond(self):
+        """Epic should not auto-advance if already in review/done/closed."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Already Review Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Child",
+            parent_id=epic_id
+        )
+
+        # Move epic to done
+        self.db.set_status(epic_id, "done")
+
+        # Complete child - epic should stay done, not change
+        self.db.close_item(child_id)
+
+        epic = self.db.get_item(epic_id)
+        self.assertEqual(epic['status_name'], 'done')
+
+    # --- Epic Closure Blocking Tests ---
+
+    def test_block_epic_closure_incomplete_children(self):
+        """Epic cannot be closed if children are incomplete."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Incomplete Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Incomplete Child",
+            parent_id=epic_id
+        )
+
+        result = self.db.close_item(epic_id)
+        self.assertFalse(result['success'])
+        self.assertIn('incomplete', result['message'].lower())
+
+    def test_epic_closure_all_complete(self):
+        """Epic can be closed when all children are complete."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Complete Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Child",
+            parent_id=epic_id
+        )
+
+        # Complete the child
+        self.db.set_status(child_id, "done")
+
+        # Now epic can be closed
+        result = self.db.close_item(epic_id)
+        self.assertTrue(result['success'])
+
+    # --- Set Parent Tests ---
+
+    def test_set_parent(self):
+        """set_parent should update item's parent."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="New Parent"
+        )
+        orphan_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Orphan"
+        )
+
+        result = self.db.set_parent(orphan_id, epic_id)
+        self.assertTrue(result['success'])
+
+        item = self.db.get_item(orphan_id)
+        self.assertEqual(item['parent_id'], epic_id)
+
+    def test_set_parent_remove(self):
+        """set_parent with None/0 should remove parent."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Child",
+            parent_id=epic_id
+        )
+
+        result = self.db.set_parent(child_id, None)
+        self.assertTrue(result['success'])
+
+        item = self.db.get_item(child_id)
+        self.assertIsNone(item['parent_id'])
+
+    def test_set_parent_circular_fails(self):
+        """set_parent should prevent circular references."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Epic"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Child Epic",
+            parent_id=epic_id
+        )
+
+        # Try to make parent a child of its own child
+        result = self.db.set_parent(epic_id, child_id)
+        self.assertFalse(result['success'])
+        self.assertIn('circular', result['error'].lower())
+
+    def test_set_parent_self_fails(self):
+        """Item cannot be its own parent."""
+        item_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Self Parent"
+        )
+
+        result = self.db.set_parent(item_id, item_id)
+        self.assertFalse(result['success'])
+
+
+class TestEpicMCPTools(unittest.TestCase):
+    """Test epic MCP tools."""
+
+    def setUp(self):
+        from kanban_mcp import KanbanMCPServer
+        self.server = KanbanMCPServer()
+        self.test_project_path = "/tmp/test-epic-tools"
+        cleanup_test_project(self.server.db, self.test_project_path)
+        self.server.tools['set_current_project']['function'](self.test_project_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.server.db, self.test_project_path)
+
+    def test_new_item_with_parent_id(self):
+        """new_item tool should accept parent_id parameter."""
+        epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Test Epic"
+        )
+        epic_id = epic_result['item']['id']
+
+        child_result = self.server.tools['new_item']['function'](
+            item_type="feature",
+            title="Child Feature",
+            parent_id=epic_id
+        )
+        self.assertTrue(child_result['success'])
+        self.assertEqual(child_result['item']['parent_id'], epic_id)
+
+    def test_get_epic_progress_tool(self):
+        """get_epic_progress tool should return progress stats."""
+        epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Progress Epic"
+        )
+        epic_id = epic_result['item']['id']
+
+        self.server.tools['new_item']['function'](
+            item_type="issue",
+            title="Child",
+            parent_id=epic_id
+        )
+
+        progress_result = self.server.tools['get_epic_progress']['function'](epic_id)
+        self.assertTrue(progress_result['success'])
+        self.assertEqual(progress_result['progress']['total'], 1)
+        self.assertEqual(progress_result['progress']['completed'], 0)
+
+    def test_set_parent_tool(self):
+        """set_parent tool should set item parent."""
+        epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Epic"
+        )
+        epic_id = epic_result['item']['id']
+
+        orphan_result = self.server.tools['new_item']['function'](
+            item_type="issue",
+            title="Orphan"
+        )
+        orphan_id = orphan_result['item']['id']
+
+        result = self.server.tools['set_parent']['function'](orphan_id, epic_id)
+        self.assertTrue(result['success'])
+
+    def test_list_children_tool(self):
+        """list_children tool should return children."""
+        epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Epic"
+        )
+        epic_id = epic_result['item']['id']
+
+        self.server.tools['new_item']['function'](
+            item_type="issue",
+            title="Child 1",
+            parent_id=epic_id
+        )
+        self.server.tools['new_item']['function'](
+            item_type="feature",
+            title="Child 2",
+            parent_id=epic_id
+        )
+
+        result = self.server.tools['list_children']['function'](epic_id)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['count'], 2)
+
+    def test_list_children_recursive(self):
+        """list_children with recursive=True should return all descendants."""
+        epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Root Epic"
+        )
+        epic_id = epic_result['item']['id']
+
+        sub_epic_result = self.server.tools['new_item']['function'](
+            item_type="epic",
+            title="Sub Epic",
+            parent_id=epic_id
+        )
+        sub_epic_id = sub_epic_result['item']['id']
+
+        self.server.tools['new_item']['function'](
+            item_type="issue",
+            title="Grandchild",
+            parent_id=sub_epic_id
+        )
+
+        result = self.server.tools['list_children']['function'](epic_id, recursive=True)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['count'], 2)
+
+
+class TestSearch(unittest.TestCase):
+    """Test full-text search functionality."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp import KanbanDB
+        cls.db = KanbanDB()
+        cls.test_project_path = "/tmp/test-search"
+        cls.test_project_id = cls.db.hash_project_path(cls.test_project_path)
+
+    def setUp(self):
+        from kanban_mcp import KanbanDB
+        self.db = KanbanDB()
+        cleanup_test_project(self.db, self.test_project_path)
+        self.db.ensure_project(self.test_project_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_project_path)
+
+    def test_search_finds_item_by_title(self):
+        """search should find items matching title."""
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Authentication bug in login form"
+        )
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Add dark mode toggle"
+        )
+
+        results = self.db.search(self.test_project_id, "authentication")
+        self.assertGreater(len(results['items']), 0)
+        self.assertTrue(any('authentication' in r['title'].lower() for r in results['items']))
+
+    def test_search_finds_item_by_description(self):
+        """search should find items matching description."""
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Bug fix",
+            description="The authentication system fails when using OAuth tokens"
+        )
+
+        results = self.db.search(self.test_project_id, "OAuth")
+        self.assertGreater(len(results['items']), 0)
+
+    def test_search_finds_updates(self):
+        """search should find updates matching content."""
+        self.db.add_update(self.test_project_id, "Implemented the authentication middleware today")
+
+        results = self.db.search(self.test_project_id, "middleware")
+        self.assertGreater(len(results['updates']), 0)
+
+    def test_search_returns_relevance_scores(self):
+        """search results should include relevance scores."""
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Database connection pooling issue"
+        )
+
+        results = self.db.search(self.test_project_id, "database")
+        self.assertGreater(len(results['items']), 0)
+        self.assertIn('score', results['items'][0])
+        self.assertIsInstance(results['items'][0]['score'], float)
+
+    def test_search_respects_project_scope(self):
+        """search should only return results from specified project."""
+        other_project_path = "/tmp/test-search-other"
+        other_project_id = self.db.hash_project_path(other_project_path)
+        self.db.ensure_project(other_project_path)
+
+        try:
+            # Create item in other project
+            self.db.create_item(
+                project_id=other_project_id,
+                type_name="issue",
+                title="Unique searchterm xyz123"
+            )
+
+            # Search in our test project should not find it
+            results = self.db.search(self.test_project_id, "xyz123")
+            self.assertEqual(len(results['items']), 0)
+        finally:
+            cleanup_test_project(self.db, other_project_path)
+
+    def test_search_respects_limit(self):
+        """search should respect limit parameter."""
+        for i in range(10):
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="issue",
+                title=f"Searchable item number {i}"
+            )
+
+        results = self.db.search(self.test_project_id, "searchable", limit=3)
+        self.assertLessEqual(len(results['items']), 3)
+
+    def test_search_no_results(self):
+        """search should return empty results for no matches."""
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Normal issue"
+        )
+
+        results = self.db.search(self.test_project_id, "xyznonexistent123")
+        self.assertEqual(len(results['items']), 0)
+        self.assertEqual(len(results['updates']), 0)
+
+    def test_search_returns_item_metadata(self):
+        """search results should include type and status."""
+        self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Searchable feature request"
+        )
+
+        results = self.db.search(self.test_project_id, "searchable")
+        self.assertGreater(len(results['items']), 0)
+        item = results['items'][0]
+        self.assertIn('type_name', item)
+        self.assertIn('status_name', item)
+        self.assertEqual(item['type_name'], 'feature')
+
+
+class TestSearchMCPTool(unittest.TestCase):
+    """Test search MCP tool."""
+
+    def setUp(self):
+        from kanban_mcp import KanbanMCPServer
+        self.server = KanbanMCPServer()
+        self.test_project_path = "/tmp/test-search-tool"
+        cleanup_test_project(self.server.db, self.test_project_path)
+        self.server.tools['set_current_project']['function'](self.test_project_path)
+
+    def tearDown(self):
+        cleanup_test_project(self.server.db, self.test_project_path)
+
+    def test_search_tool_exists(self):
+        """search tool should be registered."""
+        self.assertIn('search', self.server.tools)
+
+    def test_search_tool_returns_results(self):
+        """search tool should return search results."""
+        self.server.tools['new_item']['function'](
+            item_type="issue",
+            title="Searchable test item"
+        )
+
+        result = self.server.tools['search']['function'](query="searchable")
+        self.assertTrue(result['success'])
+        self.assertIn('items', result)
+        self.assertIn('updates', result)
+        self.assertIn('total_count', result)
+
+    def test_search_tool_respects_limit(self):
+        """search tool should accept limit parameter."""
+        for i in range(5):
+            self.server.tools['new_item']['function'](
+                item_type="issue",
+                title=f"Findable item {i}"
+            )
+
+        result = self.server.tools['search']['function'](query="findable", limit=2)
+        self.assertTrue(result['success'])
+        self.assertLessEqual(len(result['items']), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
