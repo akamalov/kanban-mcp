@@ -113,7 +113,7 @@ cd kanban-mcp
 docker compose up
 ```
 
-This starts MySQL 8.0 and the web UI on port 5000. Migrations run automatically via `initdb.d`. MySQL is exposed on port 3306 so the host-side MCP server can connect. The MCP server still needs a separate install (pipx or pip) since MCP clients spawn it as a subprocess.
+This starts MySQL 8.0 and the web UI on port 5000. Migrations run automatically on web container startup. MySQL is exposed on port 3306 so the host-side MCP server can connect. The MCP server still needs a separate install (pipx or pip) since MCP clients spawn it as a subprocess.
 
 Credentials are configurable via environment variables:
 
@@ -131,7 +131,9 @@ Requires **MySQL 8.0+** running locally (or remotely).
 kanban-setup
 ```
 
-Prompts for database name, user, password, and MySQL root credentials, then creates the database, runs migrations, and writes credentials to `~/.config/kanban-mcp/.env`.
+Prompts for database name, user, password, and MySQL root credentials (including root password), then creates the database, runs migrations, and writes credentials to `~/.config/kanban-mcp/.env`.
+
+> **Note:** On Debian/Ubuntu, `default-mysql-server` installs MariaDB, which defaults to `auth_socket` for the root user. Socket auth only works when the OS user matches the MySQL user (i.e. running as OS root). For non-root users, provide the MySQL root password when prompted — this is the normal path.
 
 > **Note:** `kanban-setup --with-semantic` installs the semantic search Python packages. This is only needed if you installed without `[semantic]` initially (e.g. `pipx install kanban-mcp`). If you already installed with `kanban-mcp[semantic]`, you don't need this flag.
 
@@ -154,22 +156,25 @@ KANBAN_DB_NAME=kanban KANBAN_DB_USER=kanban KANBAN_DB_PASSWORD=secret \
 kanban-setup --auto --db-name mydb --db-user myuser --db-password secret
 ```
 
-> **Note:** If your MySQL root user requires a password (most setups), you must provide `--mysql-root-password` or `MYSQL_ROOT_PASSWORD`. Without it, `kanban-setup --auto` will attempt socket authentication, which fails on most non-local MySQL setups.
+> **Important:** `MYSQL_ROOT_PASSWORD` is **required** for non-interactive use unless you are running as OS root. Socket auth (`auth_socket`) only works when the OS user matches the MySQL user. On Debian/Ubuntu, MariaDB defaults root to `auth_socket` — set `MYSQL_ROOT_PASSWORD` or use the manual SQL setup below.
 
 ### Install script reference
 
 The install scripts can be run from the repo or downloaded standalone:
 
 ```bash
-./install.sh                          # interactive (detects MySQL, offers Docker)
-./install.sh --auto                   # non-interactive, local MySQL
-./install.sh --auto --docker          # non-interactive, Docker for MySQL
-./install.sh --auto --db-host HOST    # non-interactive, remote MySQL
+./install.sh                                        # interactive (detects MySQL, offers Docker)
+./install.sh --auto                                  # non-interactive, local MySQL (socket auth)
+MYSQL_ROOT_PASSWORD=rootpass ./install.sh --auto      # non-interactive, with root password
+./install.sh --auto --docker                         # non-interactive, Docker for MySQL
+./install.sh --auto --db-host HOST                   # non-interactive, remote MySQL
+./install.sh --upgrade                               # upgrade existing Docker install
 
 .\install.ps1                         # Windows interactive
 .\install.ps1 -Auto                   # Windows non-interactive
 .\install.ps1 -Auto -Docker           # Windows Docker
 .\install.ps1 -Auto -DbHost HOST      # Windows remote MySQL
+.\install.ps1 -Upgrade                # upgrade existing Docker install
 ```
 
 | Env Variable | Default | Description |
@@ -179,17 +184,23 @@ The install scripts can be run from the repo or downloaded standalone:
 | `KANBAN_DB_PASSWORD` | *(auto-generated)* | Database password |
 | `KANBAN_DB_HOST` | `localhost` | MySQL host |
 | `MYSQL_ROOT_USER` | `root` | MySQL admin user |
-| `MYSQL_ROOT_PASSWORD` | *(none — tries socket auth)* | MySQL admin password |
+| `MYSQL_ROOT_PASSWORD` | *(none — tries socket auth)* | MySQL admin password (**required** unless running as OS root) |
 
 ### Manual
+
+Manual setup is a good alternative if MySQL root auth is problematic (e.g. socket auth issues, restricted access).
 
 ```sql
 -- As MySQL root user:
 CREATE DATABASE kanban CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'kanban'@'localhost' IDENTIFIED BY 'your_password_here';
 CREATE USER 'kanban'@'%' IDENTIFIED BY 'your_password_here';
+GRANT ALL PRIVILEGES ON `kanban`.* TO 'kanban'@'localhost';
 GRANT ALL PRIVILEGES ON `kanban`.* TO 'kanban'@'%';
 FLUSH PRIVILEGES;
 ```
+
+> **Note:** On MariaDB, `'kanban'@'%'` does not match localhost socket connections — you need both the `@'localhost'` and `@'%'` users.
 
 Run the migration files in order:
 
@@ -359,6 +370,8 @@ Hooks inject active kanban items at session start and prompt for progress update
 
 ## Upgrading
 
+Database migrations run automatically on startup — no manual migration step needed after upgrading.
+
 **pipx:**
 ```bash
 pipx upgrade kanban-mcp
@@ -374,81 +387,58 @@ pip install --user --upgrade kanban-mcp
 cd kanban-mcp && git pull && pip install -e .[dev,semantic]
 ```
 
-After upgrading, re-run `kanban-setup` if new migrations were added (it's safe to re-run — existing tables are preserved).
+**Docker:**
+```bash
+./install.sh --upgrade
+# Windows: .\install.ps1 -Upgrade
+```
 
-## AI Agent Install Guide
+This re-downloads the latest Docker files, rebuilds the web image from PyPI, and restarts the containers. Migrations run automatically on container startup.
 
-Machine-parseable setup instructions for automated installation by AI agents. These steps are client-agnostic — adapt the MCP config file path and format for your specific AI tool (see MCP Client Setup above).
+## For AI Coding Agents
 
-### Quick path (recommended for agents)
+**Claude, Gemini, GPT, Codex, and other agents: start here.**
 
-If MySQL is running and the root user has socket auth or a known password:
+If your human has asked you to install kanban-mcp, follow these steps exactly. Do not improvise. The `--auto` flag handles all prompts.
+
+### 1. Install and set up the database
+
+Ask your human whether MySQL is already running locally, or whether to use Docker. Then run the appropriate one-liner:
 
 ```bash
-pipx install kanban-mcp[semantic]
-kanban-setup --auto --mysql-root-password rootpass
+# Local MySQL (socket auth or set MYSQL_ROOT_PASSWORD):
+curl -fsSL https://raw.githubusercontent.com/multidimensionalcats/kanban-mcp/main/install.sh | bash -s -- --auto
+
+# No MySQL — use Docker:
+curl -fsSL https://raw.githubusercontent.com/multidimensionalcats/kanban-mcp/main/install.sh | bash -s -- --auto --docker
+
+# Remote MySQL:
+curl -fsSL https://raw.githubusercontent.com/multidimensionalcats/kanban-mcp/main/install.sh | bash -s -- --auto --db-host HOST
 ```
 
-The `--auto` flag skips all prompts. Credentials come from CLI args, env vars, or sensible defaults. The generated `.env` file (at `~/.config/kanban-mcp/.env`) and stdout output contain the credentials needed for MCP config. If your MySQL root user uses socket auth (no password), omit `--mysql-root-password`.
+Set `MYSQL_ROOT_PASSWORD` before running if MySQL root uses password auth.
 
-Then add to your MCP client config:
-
-```json
-{
-  "command": "kanban-mcp"
-}
+For Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/multidimensionalcats/kanban-mcp/main/install.ps1 | iex
 ```
 
-The config file location and wrapper key depend on your tool — see MCP Client Setup.
+This installs pipx (if needed), installs kanban-mcp, creates the database, runs migrations, and writes credentials to `~/.config/kanban-mcp/.env`.
 
-### Manual path (step by step)
+### 2. Add MCP config
 
-#### Step 1: Check prerequisites
+Write the config entry for whichever tool you are:
 
-```bash
-python3 --version   # Requires 3.10+
-mysql --version     # Requires MySQL 8.0+
-```
+| Tool | Config file | Key | Format |
+|------|-------------|-----|--------|
+| Claude Code | `.mcp.json` (project) or `~/.claude.json` (global) | `mcpServers` | JSON |
+| Claude Desktop | `~/.config/Claude/claude_desktop_config.json` | `mcpServers` | JSON |
+| Gemini CLI | `~/.gemini/settings.json` | `mcpServers` | JSON |
+| VS Code / Copilot | `.vscode/mcp.json` | `servers` | JSON |
+| Cursor | `.cursor/mcp.json` | `mcpServers` | JSON |
+| Codex CLI | `~/.codex/config.toml` | `[mcp_servers.kanban]` | TOML |
 
-#### Step 2: Install kanban-mcp
-
-```bash
-pipx install kanban-mcp[semantic]    # with semantic search (recommended)
-# OR without semantic search:
-pipx install kanban-mcp
-```
-
-#### Step 3: Set up the database
-
-```bash
-# If MySQL root uses password auth:
-kanban-setup --auto --mysql-root-password rootpass
-
-# If MySQL root uses socket auth (no password):
-kanban-setup --auto
-```
-
-Or manually:
-
-```sql
--- Connect as root: mysql -u root -p
-CREATE DATABASE kanban CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'kanban'@'%' IDENTIFIED BY 'GENERATE_A_SECURE_PASSWORD';
-GRANT ALL PRIVILEGES ON `kanban`.* TO 'kanban'@'%';
-FLUSH PRIVILEGES;
-```
-
-```bash
-# Run migrations (replace password)
-mysql -u kanban -pYOUR_PASSWORD kanban < "$(python3 -c 'import kanban_mcp, os; print(os.path.dirname(kanban_mcp.__file__))')/migrations/001_initial_schema.sql"
-mysql -u kanban -pYOUR_PASSWORD kanban < "$(python3 -c 'import kanban_mcp, os; print(os.path.dirname(kanban_mcp.__file__))')/migrations/002_add_fulltext_search.sql"
-mysql -u kanban -pYOUR_PASSWORD kanban < "$(python3 -c 'import kanban_mcp, os; print(os.path.dirname(kanban_mcp.__file__))')/migrations/003_add_embeddings.sql"
-mysql -u kanban -pYOUR_PASSWORD kanban < "$(python3 -c 'import kanban_mcp, os; print(os.path.dirname(kanban_mcp.__file__))')/migrations/004_add_cascades_and_indexes.sql"
-```
-
-#### Step 4: MCP config
-
-Add kanban-mcp to your AI tool's MCP configuration. The server entry is:
+The server entry (JSON example):
 
 ```json
 {
@@ -458,68 +448,39 @@ Add kanban-mcp to your AI tool's MCP configuration. The server entry is:
 }
 ```
 
-| Tool | Config file | Wrapper key |
-|------|-------------|-------------|
-| Claude Code | `~/.claude.json` or `.mcp.json` | `mcpServers` |
-| Claude Desktop | `~/.config/Claude/claude_desktop_config.json` | `mcpServers` |
-| Gemini CLI | `~/.gemini/settings.json` | `mcpServers` |
-| VS Code / Copilot | `.vscode/mcp.json` | `servers` |
-| Codex CLI | `~/.codex/config.toml` | `[mcp_servers.kanban]` |
-| Cursor | `.cursor/mcp.json` | `mcpServers` |
+No `env` block is needed — credentials are read from `~/.config/kanban-mcp/.env` which `kanban-setup` created in step 2.
 
-If the tool can't read the `.env` file, add the `env` block with the four `KANBAN_DB_*` variables (see Configuration > Credentials).
-
-#### Step 5: Hooks setup (optional, Claude Code)
-
-Find the full path to the hook commands (hooks run via `/bin/sh`, not your shell profile):
+### 3. Verify
 
 ```bash
-which kanban-hook-session-start   # e.g. /home/user/.local/bin/kanban-hook-session-start
-which kanban-hook-stop            # e.g. /home/user/.local/bin/kanban-hook-stop
+kanban-cli --project /path/to/humans/project summary
 ```
 
-Add to `~/.claude/settings.json`, using the full paths from above:
+### 4. Hooks (optional, Claude Code only)
+
+Hooks inject active kanban items at session start. The commands run via `/bin/sh` which does not read shell profiles, so you must use absolute paths. Find them:
+
+```bash
+which kanban-hook-session-start
+which kanban-hook-stop
+```
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/user/.local/bin/kanban-hook-session-start"
-          }
-        ]
-      }
+      { "hooks": [{ "type": "command", "command": "ABSOLUTE_PATH/kanban-hook-session-start" }] }
     ],
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/user/.local/bin/kanban-hook-stop"
-          }
-        ]
-      }
+      { "hooks": [{ "type": "command", "command": "ABSOLUTE_PATH/kanban-hook-stop" }] }
     ]
   }
 }
 ```
 
-#### Step 6: Verify installation
-
-```bash
-kanban-cli --project /path/to/your/project summary
-```
-
-Expected output (for a new/empty project):
-
-```
-No items found for this project.
-```
-
-For a project with existing items, you'll see a table of item counts grouped by type and status.
+Replace `ABSOLUTE_PATH` with the actual paths from `which`.
 
 ## Entry Points
 
