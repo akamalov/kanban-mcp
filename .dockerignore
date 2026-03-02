@@ -7,3 +7,7 @@ tests/
 models/
 *.md
 mockup.html
+dist/
+*.egg-info/
+.venv/
+build/

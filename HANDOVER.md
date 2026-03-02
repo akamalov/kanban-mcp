@@ -1,68 +1,60 @@
 # HANDOVER
 
-## Last Session (2026-02-25)
+## Last Session (2026-02-28)
 
 ### Completed
 
-**`kanban-setup` console script (#7538)** — Cross-platform Python DB setup replacing shell scripts as the primary install path for pip users:
-- Created `kanban_mcp/setup.py` — interactive mode (prompts) and `--auto` mode (env vars / CLI args / defaults)
-- Connects as MySQL root, creates DB + user + grants, runs all migrations via `cursor.execute(sql, multi=True)`, writes `.env`, prints MCP config JSON
-- CLI args: `--auto`, `--with-semantic`, `--db-name`, `--db-user`, `--db-password`, `--db-host`, `--mysql-root-user`, `--mysql-root-password`
-- Added `kanban-setup` entry point in `pyproject.toml`
-- Created `tests/test_setup.py` — 17 unit tests (arg parsing, password gen, migration discovery, .env writing, config resolution)
-- Updated README.md: Quick Start, Database Setup, AI Agent Install Guide, Entry Points table all use `kanban-setup` as canonical path. Shell scripts demoted to "Alternative: from source" section.
-- `install.sh` / `install.ps1` kept in repo for source installs
+**Docker setup for open-source release (#7535)** — Full Docker integration into install scripts:
+- `install.sh` rewritten: `--docker` and `--db-host HOST` flags, MySQL reachability detection (mysqladmin/mysql/nc/dev-tcp fallbacks), Docker availability check, interactive 3-way menu (local/remote/Docker), downloads Docker files from GitHub for standalone use, pipx auto-install
+- `install.ps1` mirrors all install.sh changes for Windows PowerShell (`-Docker`, `-DbHost`, TCP connection check via TcpClient, `Invoke-WebRequest` for downloads)
+- `docker-compose.yml` parameterised with `${VAR:-default}` env var substitution for all credentials
+- `.dockerignore` added `dist/`, `*.egg-info/`, `.venv/`, `build/`
+- `README.md` restructured: Quick Start one-liners (`curl | bash` / `irm | iex`), separate Prerequisites section, Installation section explains install script as primary path with all flag variants
+- `Dockerfile` switched from Flask dev server (`kanban-web`) to `gunicorn -b 0.0.0.0:5000 kanban_mcp.web:app` for production use
 
-**parent_id epic-only bug fix (planned)** — Plan written at `.claude/plans/peaceful-swimming-spindle.md`. `set_parent()` already enforces epic-only parents but `create_item()` does not. One-line fix + test update. **Execute this plan before doing anything else next session.**
+**Blocked items bug fix (#21042)** — Web UI prevented dragging cards even when all blockers were done/closed:
+- Root cause: `get_all_relationships()` in `web.py` didn't include blocker status; template set `data-blocked="true"` for any item with blocking relationships regardless of blocker state
+- Fix: joined statuses table in query, added `status` field to `blocked_by` entries, template now filters with `rejectattr('status', 'in', ['done', 'closed'])`
+- 4 new tests in `TestBlockedCardRendering`: active blocker, done blocker, closed blocker, partial blockers
+
+**Item #7535 advanced** from backlog to todo during debugging (was stuck due to the #21042 bug itself).
 
 ### Decisions Made This Session
-- **Run tests under python3.13**, not 3.14. Live deployment uses 3.13, onnxruntime is installed there. 3.14 lacks onnxruntime ebuild on Gentoo. All 405 tests pass with 0 skips under 3.13.
-- **No venv needed** — project runs against system python. The `.venv/` directory in the repo is vestigial and can be deleted.
-- **`--break-system-packages` was used incorrectly** — an editable install was put into `~/.local/lib/python3.14/`. Should be cleaned up (`pip3.14 uninstall kanban-mcp`).
-- **Shell scripts stay** — `install.sh` and `install.ps1` remain for from-source users but are no longer the primary path.
+- **Gunicorn over nginx/apache in Docker** — gunicorn is sufficient for a single-user kanban board, no need for a reverse proxy. Installed only in the container (`pip install gunicorn` in Dockerfile), not as a package dependency.
+- **Install scripts as primary entry point** — `install.sh` and `install.ps1` are the single entry points that handle everything (pipx, MySQL detection, Docker, .env). Docker is one option within the script, not a separate install path.
+- **Docker files downloaded from GitHub** — install scripts download `docker-compose.yml`, `Dockerfile`, `pyproject.toml`, and migrations into `~/.config/kanban-mcp/docker/` so they work standalone without cloning the repo.
+- **Blocked status based on active blockers only** — `is_blocked` in web UI now checks blocker status (done/closed = resolved), matching the server-side `get_blocking_items()` behavior.
 
-### Environment State (messy, needs cleanup)
-- **Live deployment**: `~/kanban_mcp/` — old flat-file layout, runs under python3.13, has onnxruntime. MCP server processes are running from here.
-- **Dev tree**: `./kanban_mcp/` — the packaged version. Editable-installed into python3.14 system site-packages via `--break-system-packages`.
-- **System python3.14**: has kanban-mcp editable install in `~/.local/lib/python3.14/`. Missing onnxruntime.
-- **System python3.13**: has onnxruntime. Tests should run under this.
-- **`.venv/`**: exists but empty/unused. Should be deleted.
-
-### Current Branch State
-- `rebase-clean` — 7 clean commits + uncommitted work from this session
-- `master` — old 41-commit history (will be replaced)
-- `backup-pre-rebase` — safety copy of old master
-
-### Test Results
-- 405 passed, 0 skipped under python3.13 (`python3.13 -m pytest tests/ -v`)
+### Environment State
+- **Branch**: `rebase-clean` — uncommitted changes from this and previous sessions
+- **Tests**: `python3.13 -m pytest tests/ -v` — 388 pass (384 original + 4 new)
+- **Still needs**: commit all work, tag, publish to PyPI
 
 ## Next Session
 
-### Primary: PyPI publish and v0.1.0 tag
+### Primary: Consolidate timeline and updates (#7540)
 
-Presuming parent_id fix is already committed:
+**Read the plan document first:** There is no separate plan doc yet — this needs planning in the next session via plan mode.
 
-1. **Final pre-publish checks**:
-   - `python3.13 -m pytest tests/` — all 405+ tests pass
-   - `python3.13 -m build` — produces dist/
-   - Verify README renders correctly on PyPI (use `twine check dist/*`)
+**Issue description:** Current UX has two separate FABs (Updates and Timeline), timeline doesn't show full update text, updates panel is redundant and doesn't show status changes/decisions/commits. Consolidate into a single panel that replaces both drawers. The timeline view should be the canonical activity view with full update content, status changes, decisions, and commits. Remove the separate updates drawer and FAB.
 
-2. **Publish to PyPI**:
-   - `pip install build twine`
-   - `python3.13 -m build`
-   - `twine upload dist/*` (user has PyPI account created)
+**Key files to explore:**
+- `kanban_mcp/static/timeline.js` — current timeline drawer logic
+- `kanban_mcp/static/app.js` — updates drawer logic, FAB buttons
+- `kanban_mcp/templates/index.html` — drawer markup, FAB markup
+- `kanban_mcp/static/styles.css` — drawer/FAB styles
+- `kanban_mcp/web.py` — API endpoints for timeline and updates data
 
-3. **Replace master with rebase-clean**:
-   - Tag `v0.1.0` on rebase-clean
-   - Force-push to main/master
+**Approach considerations:**
+- Single unified activity panel replaces both drawers
+- Timeline entries should show full update content (not truncated)
+- Must still support creating new updates from the panel
+- Status changes, decisions, commits, and updates all in one chronological view
+- Consider whether it's a slide-out drawer or a different UI pattern
 
-4. **Clean up dev environment** (optional):
-   - `pip3.14 uninstall kanban-mcp` to remove the --break-system-packages mess
-   - Delete `.venv/`
-
-### Blocked: Docker testing (#7535)
-User is recompiling Gentoo kernel with Docker-required CONFIG options. Docker compose setup exists but is untested.
-
-### Remaining open-source epic (#7532) children:
-- #7535 Docker and docker-compose setup (blocked on kernel recompile)
-- #7538 Manual install documentation (in_progress — kanban-setup done, README updated)
+### Still TODO
+- Commit all outstanding work and tag release
+- Force-push rebase-clean to main
+- Publish updated version to PyPI
+- #7535 Docker setup — code is done, needs user testing
+- #21042 Blocked items bug — code is done, needs user testing in browser

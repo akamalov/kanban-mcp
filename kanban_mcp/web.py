@@ -8,7 +8,21 @@ from kanban_mcp.core import KanbanDB
 from kanban_mcp.export import ExportBuilder, export_to_format, get_mime_type, get_file_extension
 
 app = Flask(__name__)
-db = KanbanDB()
+db = None
+
+
+def _get_db():
+    """Lazy-init the database connection."""
+    global db
+    if db is None:
+        db = KanbanDB()
+    return db
+
+
+@app.before_request
+def _ensure_db():
+    """Initialize DB on first request, not at import time."""
+    _get_db()
 
 
 # --- API Routes ---
@@ -608,15 +622,19 @@ STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'closed']
 def get_all_relationships(project_id):
     """Get relationships for all items in a project, organized by item."""
     relationships = {}
-    
+
     with db._db_cursor(dictionary=True) as cursor:
         # Get all relationships where source or target is in this project
+        # Include statuses so we can determine if blockers are resolved
         cursor.execute("""
             SELECT r.source_item_id, r.target_item_id, r.relationship_type,
-                   si.title as source_title, ti.title as target_title
+                   si.title as source_title, ti.title as target_title,
+                   ss.name as source_status, ts.name as target_status
             FROM item_relationships r
             JOIN items si ON r.source_item_id = si.id
             JOIN items ti ON r.target_item_id = ti.id
+            JOIN statuses ss ON si.status_id = ss.id
+            JOIN statuses ts ON ti.status_id = ts.id
             WHERE si.project_id = %s OR ti.project_id = %s
         """, (project_id, project_id))
 
@@ -624,17 +642,20 @@ def get_all_relationships(project_id):
             src_id = rel['source_item_id']
             tgt_id = rel['target_item_id']
             rel_type = rel['relationship_type']
-            
+
             # Initialize if needed
             if src_id not in relationships:
                 relationships[src_id] = {'blocked_by': [], 'blocks': [], 'depends_on': [], 'dependency_of': [], 'relates_to': [], 'duplicates': []}
             if tgt_id not in relationships:
                 relationships[tgt_id] = {'blocked_by': [], 'blocks': [], 'depends_on': [], 'dependency_of': [], 'relates_to': [], 'duplicates': []}
-            
+
             if rel_type == 'blocks':
                 # source blocks target
                 relationships[src_id]['blocks'].append({'id': tgt_id, 'title': rel['target_title']})
-                relationships[tgt_id]['blocked_by'].append({'id': src_id, 'title': rel['source_title']})
+                relationships[tgt_id]['blocked_by'].append({
+                    'id': src_id, 'title': rel['source_title'],
+                    'status': rel['source_status']
+                })
             elif rel_type == 'depends_on':
                 # source depends on target
                 relationships[src_id]['depends_on'].append({'id': tgt_id, 'title': rel['target_title']})
@@ -647,7 +668,7 @@ def get_all_relationships(project_id):
                 # symmetric
                 relationships[src_id]['duplicates'].append({'id': tgt_id, 'title': rel['target_title']})
                 relationships[tgt_id]['duplicates'].append({'id': src_id, 'title': rel['source_title']})
-    
+
     return relationships
 
 @app.route('/')

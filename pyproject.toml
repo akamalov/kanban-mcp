@@ -45,6 +45,8 @@ kanban-mcp = "kanban_mcp.core:main"
 kanban-web = "kanban_mcp.web:main"
 kanban-cli = "kanban_mcp.cli:main"
 kanban-setup = "kanban_mcp.setup:main"
+kanban-hook-session-start = "kanban_mcp.hooks.session_start:main"
+kanban-hook-stop = "kanban_mcp.hooks.stop:main"
 
 [project.urls]
 Homepage = "https://github.com/multidimensionalcats/kanban-mcp"

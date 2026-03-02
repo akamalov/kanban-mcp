@@ -2265,31 +2265,6 @@ class TestEpicSupport(unittest.TestCase):
         epic = self.db.get_item(epic_id)
         self.assertEqual(epic['status_name'], 'review')
 
-    def test_auto_advance_only_affects_epic_type(self):
-        """Auto-advance should only affect epic type parents."""
-        # Feature as parent (not epic)
-        feature_id = self.db.create_item(
-            project_id=self.test_project_id,
-            type_name="feature",
-            title="Parent Feature"
-        )
-        child_id = self.db.create_item(
-            project_id=self.test_project_id,
-            type_name="issue",
-            title="Child Issue",
-            parent_id=feature_id
-        )
-
-        # Move feature to in_progress
-        self.db.set_status(feature_id, "in_progress")
-
-        # Complete child
-        self.db.set_status(child_id, "done")
-
-        # Feature should NOT auto-advance (only epics do)
-        feature = self.db.get_item(feature_id)
-        self.assertEqual(feature['status_name'], 'in_progress')
-
     def test_no_auto_advance_if_already_review_or_beyond(self):
         """Epic should not auto-advance if already in review/done/closed."""
         epic_id = self.db.create_item(
@@ -2476,6 +2451,86 @@ class TestEpicSupport(unittest.TestCase):
         self.assertFalse(result['success'])
         self.assertIn('epic', result['error'].lower())
 
+    def test_create_item_feature_as_parent_fails(self):
+        """create_item should reject feature items as parents."""
+        feature_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Feature not epic"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="issue",
+                title="Child Issue",
+                parent_id=feature_id
+            )
+        self.assertIn('epic', str(ctx.exception).lower())
+
+    def test_create_item_issue_as_parent_fails(self):
+        """create_item should reject issue items as parents."""
+        issue_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Issue not epic"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="todo",
+                title="Child Todo",
+                parent_id=issue_id
+            )
+        self.assertIn('epic', str(ctx.exception).lower())
+
+    def test_create_item_todo_as_parent_fails(self):
+        """create_item should reject todo items as parents."""
+        todo_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="todo",
+            title="Todo not epic"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="issue",
+                title="Child Issue",
+                parent_id=todo_id
+            )
+        self.assertIn('epic', str(ctx.exception).lower())
+
+    def test_create_item_diary_as_parent_fails(self):
+        """create_item should reject diary items as parents."""
+        diary_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="diary",
+            title="Diary not epic"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.db.create_item(
+                project_id=self.test_project_id,
+                type_name="issue",
+                title="Child Issue",
+                parent_id=diary_id
+            )
+        self.assertIn('epic', str(ctx.exception).lower())
+
+    def test_create_item_epic_as_parent_succeeds(self):
+        """create_item should accept epic items as parents."""
+        epic_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="epic",
+            title="Valid Epic Parent"
+        )
+        child_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Child Feature",
+            parent_id=epic_id
+        )
+        child = self.db.get_item(child_id)
+        self.assertEqual(child['parent_id'], epic_id)
+
 
 class TestEpicMCPTools(unittest.TestCase):
     """Test epic MCP tools."""
@@ -2593,6 +2648,21 @@ class TestEpicMCPTools(unittest.TestCase):
         result = self.server.tools['list_children']['function'](epic_id, recursive=True)
         self.assertTrue(result['success'])
         self.assertEqual(result['count'], 2)
+
+    def test_new_item_non_epic_parent_fails(self):
+        """new_item tool should reject non-epic parents."""
+        feature_result = self.server.tools['new_item']['function'](
+            item_type="feature",
+            title="Not an epic"
+        )
+        feature_id = feature_result['item']['id']
+
+        with self.assertRaises(Exception):
+            self.server.tools['new_item']['function'](
+                item_type="issue",
+                title="Child Issue",
+                parent_id=feature_id
+            )
 
 
 class TestSearch(unittest.TestCase):
@@ -3500,6 +3570,15 @@ class TestDecisionsMCPTools(unittest.TestCase):
         self.assertIn('created_at', decision)
 
 
+def _has_onnxruntime():
+    try:
+        import onnxruntime  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_onnxruntime(), "onnxruntime not installed (pip install kanban-mcp[semantic])")
 class TestEmbeddings(unittest.TestCase):
     """Tests for vector embedding functionality."""
 
@@ -3680,6 +3759,7 @@ class TestEmbeddings(unittest.TestCase):
         self.assertFalse(result['success'])
 
 
+@unittest.skipUnless(_has_onnxruntime(), "onnxruntime not installed (pip install kanban-mcp[semantic])")
 class TestEmbeddingsMCPTools(unittest.TestCase):
     """Tests for embedding MCP tools."""
 

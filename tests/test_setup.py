@@ -205,6 +205,91 @@ class TestConfigGathering(unittest.TestCase):
         self.assertGreaterEqual(len(config["db_password"]), 16)
 
 
+class TestGetConfigDir(unittest.TestCase):
+    """Test the shared get_config_dir() helper."""
+
+    def test_linux_default(self):
+        from kanban_mcp.core import get_config_dir
+        with patch("sys.platform", "linux"), \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            result = get_config_dir()
+            self.assertEqual(result, Path.home() / ".config" / "kanban-mcp")
+
+    def test_linux_xdg_override(self):
+        from kanban_mcp.core import get_config_dir
+        with patch("sys.platform", "linux"), \
+             patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}, clear=False):
+            result = get_config_dir()
+            self.assertEqual(result, Path("/tmp/xdg/kanban-mcp"))
+
+    def test_windows(self):
+        from kanban_mcp.core import get_config_dir
+        with patch("sys.platform", "win32"), \
+             patch.dict(os.environ, {"APPDATA": "C:\\Users\\test\\AppData\\Roaming"}, clear=False):
+            result = get_config_dir()
+            # On Linux, Path uses forward slashes; just check the components
+            self.assertEqual(result.name, "kanban-mcp")
+            self.assertTrue(str(result).startswith("C:"))
+
+    def test_returns_path_object(self):
+        from kanban_mcp.core import get_config_dir
+        result = get_config_dir()
+        self.assertIsInstance(result, Path)
+
+
+class TestHandleEnvFileConfigDir(unittest.TestCase):
+    """Test that _handle_env_file writes to the config dir, not CWD."""
+
+    def test_writes_to_config_dir(self):
+        from kanban_mcp.setup import _handle_env_file
+        config = {
+            "db_host": "localhost",
+            "db_user": "kanban",
+            "db_password": "secret",
+            "db_name": "kanban",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / "kanban-mcp"
+            with patch("kanban_mcp.core.get_config_dir", return_value=config_dir):
+                _handle_env_file(config, auto=True)
+            env_path = config_dir / ".env"
+            self.assertTrue(env_path.exists())
+            content = env_path.read_text()
+            self.assertIn("KANBAN_DB_PASSWORD=secret", content)
+
+    def test_does_not_write_to_cwd(self):
+        from kanban_mcp.setup import _handle_env_file
+        config = {
+            "db_host": "localhost",
+            "db_user": "kanban",
+            "db_password": "secret",
+            "db_name": "kanban",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / "kanban-mcp"
+            cwd_env = Path(tmpdir) / "cwd" / ".env"
+            with patch("kanban_mcp.core.get_config_dir", return_value=config_dir), \
+                 patch("os.getcwd", return_value=str(Path(tmpdir) / "cwd")):
+                _handle_env_file(config, auto=True)
+            self.assertFalse(cwd_env.exists())
+
+    def test_creates_config_dir_if_missing(self):
+        from kanban_mcp.setup import _handle_env_file
+        config = {
+            "db_host": "localhost",
+            "db_user": "kanban",
+            "db_password": "secret",
+            "db_name": "kanban",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir) / "deep" / "nested" / "kanban-mcp"
+            with patch("kanban_mcp.core.get_config_dir", return_value=config_dir):
+                _handle_env_file(config, auto=True)
+            self.assertTrue(config_dir.exists())
+            self.assertTrue((config_dir / ".env").exists())
+
+
 class TestMcpConfigOutput(unittest.TestCase):
     """Test the MCP config JSON output helper."""
 

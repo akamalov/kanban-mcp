@@ -69,7 +69,8 @@
                  ondrop="handleDropWrapper(event)">
                 {% for item in items_by_status.get(status, []) %}
                 {% set rels = relationships.get(item.id, {}) %}
-                {% set is_blocked = rels.get('blocked_by', [])|length > 0 %}
+                {% set active_blockers = rels.get('blocked_by', [])|rejectattr('status', 'in', ['done', 'closed'])|list %}
+                {% set is_blocked = active_blockers|length > 0 %}
                 <div class="card {{ item.type }}{% if is_blocked %} blocked{% endif %}"
                      data-item-id="{{ item.id }}"
                      data-item-type="{{ item.type }}"

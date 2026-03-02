@@ -122,7 +122,7 @@ def resolve_config(args: argparse.Namespace) -> dict:
 
 
 def mcp_config_json(db_host: str, db_user: str, db_password: str, db_name: str) -> str:
-    """Return MCP client config JSON string."""
+    """Return MCP client config JSON string with explicit credentials."""
     config = {
         "mcpServers": {
             "kanban": {
@@ -133,6 +133,18 @@ def mcp_config_json(db_host: str, db_user: str, db_password: str, db_name: str) 
                     "KANBAN_DB_PASSWORD": db_password,
                     "KANBAN_DB_NAME": db_name,
                 },
+            }
+        }
+    }
+    return json.dumps(config, indent=2)
+
+
+def mcp_config_minimal_json() -> str:
+    """Return minimal MCP client config (credentials read from .env)."""
+    config = {
+        "mcpServers": {
+            "kanban": {
+                "command": "kanban-mcp",
             }
         }
     }
@@ -247,15 +259,24 @@ def _run_migrations(config: dict) -> None:
 
 
 def _handle_env_file(config: dict, auto: bool) -> None:
-    """Write .env file, prompting before overwrite in interactive mode."""
-    env_path = os.path.join(os.getcwd(), ".env")
+    """Write .env file to the user config directory.
+
+    Writes to ~/.config/kanban-mcp/.env (Linux/macOS) or %APPDATA%/kanban-mcp/.env (Windows).
+    This is the same location that core.py loads from, so all install methods
+    (pipx, pip, source) use a single consistent config path.
+    """
+    from kanban_mcp.core import get_config_dir
+
+    config_dir = get_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    env_path = str(config_dir / ".env")
     write = True
 
     if os.path.exists(env_path):
         if auto:
             pass  # overwrite silently
         else:
-            overwrite = _prompt(".env file already exists. Overwrite? [y/N]", "N")
+            overwrite = _prompt(f"{env_path} already exists. Overwrite? [y/N]", "N")
             if not overwrite.lower().startswith("y"):
                 print("Skipping .env generation.")
                 write = False
@@ -327,12 +348,34 @@ def main() -> None:
     _handle_env_file(config, args.auto)
 
     # Print next steps
+    from kanban_mcp.core import get_config_dir
+    env_path = get_config_dir() / ".env"
+
     print()
     print("=== Setup complete ===")
     print()
+    print(f"Credentials saved to: {env_path}")
+    print()
     print("Next steps:")
     print()
-    print("1. Add kanban-mcp to your MCP client config:")
+    print("1. Add kanban-mcp to your MCP client config.")
+    print()
+    print("   Since credentials are in your .env file, you just need:")
+    print()
+    print(mcp_config_minimal_json())
+    print()
+    print("   Add this to the appropriate config file for your tool:")
+    print()
+    print("   Tool               Config file                                    Key")
+    print("   ────               ───────────                                    ───")
+    print("   Claude Code        ~/.claude.json  or  .mcp.json                 mcpServers")
+    print("   Claude Desktop     ~/.config/Claude/claude_desktop_config.json   mcpServers")
+    print("   Gemini CLI         ~/.gemini/settings.json                       mcpServers")
+    print("   VS Code / Copilot  .vscode/mcp.json                             servers")
+    print("   Codex CLI          ~/.codex/config.toml                          [mcp_servers.kanban]")
+    print("   Cursor             .cursor/mcp.json                              mcpServers")
+    print()
+    print("   If your tool can't read the .env file, pass credentials explicitly:")
     print()
     print(mcp_config_json(
         config["db_host"],

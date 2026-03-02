@@ -27,11 +27,24 @@ except ImportError:
 
 from kanban_mcp.export import ExportBuilder, export_to_format
 
-# Load .env file if present (looks in CWD and script directory)
+
+def get_config_dir() -> Path:
+    """Return the user config directory for kanban-mcp.
+
+    - Linux/macOS: $XDG_CONFIG_HOME/kanban-mcp (defaults to ~/.config/kanban-mcp)
+    - Windows: %APPDATA%/kanban-mcp
+    """
+    if sys.platform == 'win32':
+        return Path(os.environ.get('APPDATA', '')) / 'kanban-mcp'
+    return Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'kanban-mcp'
+
+
+# Load .env file if present (checks multiple locations, first found wins)
 try:
     from dotenv import load_dotenv
     load_dotenv()  # CWD
-    load_dotenv(Path(__file__).parent / '.env')  # script directory
+    load_dotenv(Path(__file__).parent / '.env')  # package directory
+    load_dotenv(get_config_dir() / '.env')  # user config dir
 except ImportError:
     pass
 
@@ -223,6 +236,8 @@ class KanbanDB:
                 raise ValueError(f"Parent item not found: {parent_id}")
             if parent['project_id'] != project_id:
                 raise ValueError("Parent item must be in the same project")
+            if parent['type_name'] != 'epic':
+                raise ValueError("Parent item must be an epic")
 
         type_id = self.get_type_id(type_name)
 

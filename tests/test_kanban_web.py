@@ -279,6 +279,122 @@ class TestKanbanWebAPI(unittest.TestCase):
         self.assertEqual(data['items'][0]['title'], 'Test Issue')
 
 
+class TestBlockedCardRendering(unittest.TestCase):
+    """Tests for #21042 — blocked cards should become unblocked when blockers complete."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kanban_mcp.core import KanbanDB
+        from kanban_mcp.web import app
+
+        cls.db = KanbanDB()
+        cls.app = app
+        cls.app.config['TESTING'] = True
+        cls.client = cls.app.test_client()
+        cls.test_project_path = "/tmp/test-kanban-web-blocked"
+        cls.test_project_id = cls.db.hash_project_path(cls.test_project_path)
+
+    def setUp(self):
+        cleanup_test_project(self.db, self.test_project_path)
+        self.db.ensure_project(self.test_project_path, "Test Blocked Project")
+        # Create blocker and blocked items
+        self.blocker_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Blocker Issue"
+        )
+        self.blocked_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="feature",
+            title="Blocked Feature"
+        )
+        self.db.add_relationship(self.blocker_id, self.blocked_id, 'blocks')
+
+    def tearDown(self):
+        cleanup_test_project(self.db, self.test_project_path)
+
+    def test_active_blocker_marks_card_blocked(self):
+        """Card should have data-blocked=true when blocker is in backlog."""
+        response = self.client.get(f'/?project={self.test_project_id}')
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+        # Find the blocked card and check its data-blocked attribute
+        # The blocked item should have data-blocked="true"
+        self.assertIn(f'data-item-id="{self.blocked_id}"', html)
+        # Extract the card div for the blocked item
+        import re
+        card_match = re.search(
+            rf'<div class="card[^"]*"[^>]*data-item-id="{self.blocked_id}"[^>]*>',
+            html
+        )
+        self.assertIsNotNone(card_match, "Blocked item card should exist in HTML")
+        card_tag = card_match.group(0)
+        self.assertIn('data-blocked="true"', card_tag,
+                       "Card should be blocked when blocker is active")
+
+    def test_completed_blocker_unblocks_card(self):
+        """Card should have data-blocked=false when all blockers are done (#21042)."""
+        # Move blocker to done
+        self.db.set_status(self.blocker_id, 'done')
+
+        response = self.client.get(f'/?project={self.test_project_id}')
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        import re
+        card_match = re.search(
+            rf'<div class="card[^"]*"[^>]*data-item-id="{self.blocked_id}"[^>]*>',
+            html
+        )
+        self.assertIsNotNone(card_match, "Blocked item card should exist in HTML")
+        card_tag = card_match.group(0)
+        self.assertIn('data-blocked="false"', card_tag,
+                       "Card should NOT be blocked when all blockers are done")
+        self.assertIn('draggable="true"', card_tag,
+                       "Card should be draggable when unblocked")
+
+    def test_closed_blocker_unblocks_card(self):
+        """Card should have data-blocked=false when all blockers are closed."""
+        self.db.set_status(self.blocker_id, 'closed')
+
+        response = self.client.get(f'/?project={self.test_project_id}')
+        html = response.data.decode()
+
+        import re
+        card_match = re.search(
+            rf'<div class="card[^"]*"[^>]*data-item-id="{self.blocked_id}"[^>]*>',
+            html
+        )
+        self.assertIsNotNone(card_match)
+        card_tag = card_match.group(0)
+        self.assertIn('data-blocked="false"', card_tag)
+
+    def test_partial_blockers_still_blocked(self):
+        """Card should remain blocked if only some blockers are done."""
+        # Add a second blocker
+        blocker2_id = self.db.create_item(
+            project_id=self.test_project_id,
+            type_name="issue",
+            title="Second Blocker"
+        )
+        self.db.add_relationship(blocker2_id, self.blocked_id, 'blocks')
+        # Complete only the first blocker
+        self.db.set_status(self.blocker_id, 'done')
+
+        response = self.client.get(f'/?project={self.test_project_id}')
+        html = response.data.decode()
+
+        import re
+        card_match = re.search(
+            rf'<div class="card[^"]*"[^>]*data-item-id="{self.blocked_id}"[^>]*>',
+            html
+        )
+        self.assertIsNotNone(card_match)
+        card_tag = card_match.group(0)
+        self.assertIn('data-blocked="true"', card_tag,
+                       "Card should stay blocked when some blockers are still active")
+
+
 class TestConnectionLeaks(unittest.TestCase):
     """Tests for #8222 — no connection leaks from raw cursor usage."""
 

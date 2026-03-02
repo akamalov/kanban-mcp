@@ -4,8 +4,8 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY kanban_mcp/ kanban_mcp/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . gunicorn
 
 EXPOSE 5000
 
-CMD ["kanban-web", "--host", "0.0.0.0"]
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "kanban_mcp.web:app"]

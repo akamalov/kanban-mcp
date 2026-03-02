@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${HOME}/kanban_mcp/hooks/session_start.py"
+            "command": "kanban-hook-session-start"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${HOME}/kanban_mcp/hooks/stop.py"
+            "command": "kanban-hook-stop"
           }
         ]
       }
