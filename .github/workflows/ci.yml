@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Python tests
+  test-mysql:
+    name: "Tests (MySQL, py${{ matrix.python-version }})"
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -43,15 +43,58 @@ jobs:
 
       - name: Run migrations
         env:
+          KANBAN_DB_HOST: 127.0.0.1
+          KANBAN_DB_USER: kanban
+          KANBAN_DB_PASSWORD: testpass
+          KANBAN_DB_NAME: kanban_test
+        run: kanban-setup --auto --migrate-only
+
+      - name: Run pytest
+        env:
+          KANBAN_DB_HOST: 127.0.0.1
+          KANBAN_DB_USER: kanban
+          KANBAN_DB_PASSWORD: testpass
+          KANBAN_DB_NAME: kanban_test
+        run: pytest tests/ -x -q
+
+  test-mariadb:
+    name: "Tests (MariaDB, py3.13)"
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
           MYSQL_ROOT_PASSWORD: rootpass
-        run: |
-          mysql -u root -p"$MYSQL_ROOT_PASSWORD" -h 127.0.0.1 -e "
-            GRANT ALL PRIVILEGES ON kanban_test.* TO 'kanban'@'%';
-            FLUSH PRIVILEGES;
-          "
-          for f in kanban_mcp/migrations/0*.sql; do
-            mysql -u kanban -ptestpass -h 127.0.0.1 kanban_test < "$f"
-          done
+          MYSQL_DATABASE: kanban_test
+          MYSQL_USER: kanban
+          MYSQL_PASSWORD: testpass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -e .[dev]
+
+      - name: Run migrations
+        env:
+          KANBAN_DB_HOST: 127.0.0.1
+          KANBAN_DB_USER: kanban
+          KANBAN_DB_PASSWORD: testpass
+          KANBAN_DB_NAME: kanban_test
+        run: kanban-setup --auto --migrate-only
 
       - name: Run pytest
         env:
@@ -116,7 +159,7 @@ jobs:
         run: bash install.sh --auto
 
       - name: Verify kanban-mcp is installed
-        run: kanban-mcp --help || true
+        run: command -v kanban-mcp && echo "kanban-mcp found"
 
       - name: Verify kanban-cli works
         env:
@@ -171,3 +214,26 @@ jobs:
             exit 1
           }
           Write-Host "install.ps1 syntax OK"
+
+      - name: Run install.ps1 --auto (no DB)
+        shell: pwsh
+        run: |
+          # Install kanban-mcp; DB setup will be skipped (no MySQL running)
+          .\install.ps1 -Auto
+
+      - name: Verify kanban-mcp is installed
+        shell: pwsh
+        run: |
+          if (-not (Get-Command "kanban-mcp" -ErrorAction SilentlyContinue)) {
+            Write-Error "kanban-mcp not found in PATH"
+            exit 1
+          }
+          Write-Host "kanban-mcp found at: $(Get-Command kanban-mcp | Select-Object -ExpandProperty Source)"
+
+      - name: Install dev dependencies
+        shell: pwsh
+        run: pip install -e .[dev]
+
+      - name: Run non-DB tests
+        shell: pwsh
+        run: pytest tests/test_setup.py tests/test_export.py -x -q

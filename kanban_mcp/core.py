@@ -2514,17 +2514,8 @@ class KanbanMCPServer:
         self.name = name
         self.version = version
         self.tools = {}
-        self.db = KanbanDB()
 
-        # Auto-apply pending migrations
-        from kanban_mcp.setup import auto_migrate
-        auto_migrate(self.db.config)
-
-        # Current project state
-        self.current_project_id = None
-        self.current_project_path = None
-
-        # Setup logging
+        # Setup logging before anything that might log
         log_dir = Path.home() / ".kanban_mcp"
         log_dir.mkdir(exist_ok=True)
         logging.basicConfig(
@@ -2536,6 +2527,16 @@ class KanbanMCPServer:
 
         # Silence noisy MySQL connector logging
         logging.getLogger('mysql.connector').setLevel(logging.WARNING)
+
+        self.db = KanbanDB()
+
+        # Auto-apply pending migrations
+        from kanban_mcp.setup import auto_migrate
+        auto_migrate(self.db.config)
+
+        # Current project state
+        self.current_project_id = None
+        self.current_project_path = None
 
         self._register_tools()
         self.logger.info("Kanban MCP Server initialized")

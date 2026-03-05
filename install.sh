@@ -313,11 +313,26 @@ install_kanban_mcp() {
     if [ "$WITH_SEMANTIC" = true ]; then
         pkg="kanban-mcp[semantic]"
     fi
-    echo "Installing $pkg via pipx..."
-    if command -v pipx &>/dev/null; then
-        pipx install "$pkg"
+    # If run from a checkout with pyproject.toml, install from local
+    # source instead of PyPI (ensures code and migrations match).
+    if [ -f "pyproject.toml" ] && grep -q 'name = "kanban-mcp"' pyproject.toml 2>/dev/null; then
+        local src="."
+        if [ "$WITH_SEMANTIC" = true ]; then
+            src=".[semantic]"
+        fi
+        echo "Installing $pkg from local checkout via pipx..."
+        if command -v pipx &>/dev/null; then
+            pipx install "$src"
+        else
+            $PYTHON -m pipx install "$src"
+        fi
     else
-        $PYTHON -m pipx install "$pkg"
+        echo "Installing $pkg via pipx..."
+        if command -v pipx &>/dev/null; then
+            pipx install "$pkg"
+        else
+            $PYTHON -m pipx install "$pkg"
+        fi
     fi
     echo "kanban-mcp installed."
 }
@@ -325,9 +340,12 @@ install_kanban_mcp() {
 check_mysql_running() {
     local host="${1:-localhost}"
     local port="${2:-3306}"
-    # Try multiple methods to check MySQL reachability
+    # Try multiple methods to check MySQL/MariaDB reachability
     if command -v mysqladmin &>/dev/null; then
         mysqladmin ping -h "$host" -P "$port" --connect-timeout=2 &>/dev/null && return 0
+    fi
+    if command -v mariadb-admin &>/dev/null; then
+        mariadb-admin ping -h "$host" -P "$port" --connect-timeout=2 &>/dev/null && return 0
     fi
     if command -v mysql &>/dev/null; then
         mysql -h "$host" -P "$port" -u root --connect-timeout=2 -e "SELECT 1" &>/dev/null 2>&1 && return 0
@@ -467,6 +485,35 @@ print_next_steps() {
     echo "3. Verify installation:"
     echo "   kanban-cli --project /path/to/your/project summary"
     echo
+
+    # Print hook config snippet if hook commands are found
+    local hook_start hook_stop
+    hook_start=$(command -v kanban-hook-session-start 2>/dev/null || true)
+    hook_stop=$(command -v kanban-hook-stop 2>/dev/null || true)
+    if [ -n "$hook_start" ] && [ -n "$hook_stop" ]; then
+        echo "4. Set up hooks (recommended for Claude Code):"
+        echo
+        echo "   Hooks inject active kanban items at session start and"
+        echo "   prompt for progress updates when the session ends."
+        echo "   Without hooks, the agent only uses the board when asked."
+        echo
+        echo "   Merge into ~/.claude/settings.json:"
+        echo
+        echo '   {'
+        echo '     "hooks": {'
+        echo '       "SessionStart": ['
+        echo '         { "hooks": [{ "type": "command", "command": "'"$hook_start"'" }] }'
+        echo '       ],'
+        echo '       "Stop": ['
+        echo '         { "hooks": [{ "type": "command", "command": "'"$hook_stop"'" }] }'
+        echo '       ]'
+        echo '     }'
+        echo '   }'
+        echo
+        echo "   If you already have hooks configured, add the entries to"
+        echo "   the existing SessionStart and Stop arrays."
+        echo
+    fi
 }
 
 # ─── Step 1: Python & kanban-mcp ────────────────────────────────────
@@ -515,9 +562,9 @@ elif [ "$AUTO" = true ]; then
     MYSQL_METHOD="local"
 else
     # Interactive: detect and ask
-    echo "How do you want to connect to MySQL?"
-    echo "  1) Local MySQL (default)"
-    echo "  2) Remote MySQL server"
+    echo "How do you want to connect to MySQL/MariaDB?"
+    echo "  1) Local MySQL/MariaDB (default)"
+    echo "  2) Remote MySQL/MariaDB server"
     echo "  3) Docker (starts MySQL in a container)"
     read -rp "Choice [1]: " MYSQL_CHOICE < /dev/tty
     MYSQL_CHOICE=${MYSQL_CHOICE:-1}
@@ -537,9 +584,9 @@ case "$MYSQL_METHOD" in
     local)
         DB_HOST="${KANBAN_DB_HOST:-localhost}"
         if check_mysql_running "$DB_HOST"; then
-            echo "MySQL is running on $DB_HOST."
+            echo "MySQL/MariaDB is running on $DB_HOST."
         else
-            echo "MySQL is not running on $DB_HOST."
+            echo "MySQL/MariaDB is not running on $DB_HOST."
             if check_docker; then
                 if [ "$AUTO" = true ]; then
                     echo "Use --docker flag to start MySQL via Docker."
@@ -552,17 +599,18 @@ case "$MYSQL_METHOD" in
                     MYSQL_METHOD="docker"
                 else
                     echo
-                    echo "Please start MySQL and re-run this script."
+                    echo "Please start MySQL/MariaDB and re-run this script."
                     echo "  Ubuntu/Debian: sudo systemctl start mysql"
                     echo "  macOS:         brew services start mysql"
-                    echo "  Arch:          sudo systemctl start mysqld"
+                    echo "  Arch/Fedora:   sudo systemctl start mariadb"
                     exit 1
                 fi
             else
                 echo
-                echo "Docker is not available either. Please install MySQL or Docker:"
-                echo "  MySQL: https://dev.mysql.com/downloads/"
-                echo "  Docker: https://docs.docker.com/get-docker/"
+                echo "Docker is not available either. Please install MySQL/MariaDB or Docker:"
+                echo "  MySQL:   https://dev.mysql.com/downloads/"
+                echo "  MariaDB: https://mariadb.org/download/"
+                echo "  Docker:  https://docs.docker.com/get-docker/"
                 exit 1
             fi
         fi

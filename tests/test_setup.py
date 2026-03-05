@@ -808,12 +808,48 @@ class TestSplitSql(unittest.TestCase):
         from kanban_mcp.setup import _split_sql
         self.assertEqual(_split_sql(""), [])
 
-    def test_comments_preserved(self):
+    def test_comments_stripped(self):
         from kanban_mcp.setup import _split_sql
         sql = "-- comment\nCREATE TABLE foo (id INT);"
         result = _split_sql(sql)
         self.assertEqual(len(result), 1)
         self.assertIn("CREATE TABLE", result[0])
+
+    def test_inline_comment_stripped(self):
+        from kanban_mcp.setup import _split_sql
+        sql = "SELECT 1; -- trailing comment\nSELECT 2;"
+        result = _split_sql(sql)
+        self.assertEqual(result, ["SELECT 1", "SELECT 2"])
+
+    def test_double_dash_inside_quotes_preserved(self):
+        from kanban_mcp.setup import _split_sql
+        sql = "INSERT INTO t VALUES ('a -- b');"
+        result = _split_sql(sql)
+        self.assertEqual(result, ["INSERT INTO t VALUES ('a -- b')"])
+
+    def test_escaped_quotes(self):
+        from kanban_mcp.setup import _split_sql
+        sql = "INSERT INTO t VALUES ('it''s -- ok');"
+        result = _split_sql(sql)
+        self.assertEqual(result, ["INSERT INTO t VALUES ('it''s -- ok')"])
+
+    def test_backslash_escaped_quote(self):
+        from kanban_mcp.setup import _split_sql
+        sql = "INSERT INTO t VALUES ('it\\'s -- ok');"
+        result = _split_sql(sql)
+        self.assertEqual(
+            result,
+            ["INSERT INTO t VALUES ('it\\'s -- ok')"],
+        )
+
+    def test_backslash_escaped_backslash(self):
+        from kanban_mcp.setup import _split_sql
+        sql = "INSERT INTO t VALUES ('path\\\\dir');"
+        result = _split_sql(sql)
+        self.assertEqual(
+            result,
+            ["INSERT INTO t VALUES ('path\\\\dir')"],
+        )
 
 
 class TestFindMysqlSocket(unittest.TestCase):
@@ -1344,6 +1380,156 @@ class TestRunMigrationsConnectionError(unittest.TestCase):
             self.assertIn("Could not connect", output)
             self.assertIn("kanban", output)
             self.assertIn(".env", output)
+
+
+class TestCreateDatabasePasswordEscaping(unittest.TestCase):
+    """Test _create_database escapes single quotes in passwords."""
+
+    @patch("kanban_mcp.setup._find_mysql_socket")
+    @patch("kanban_mcp.setup.mysql.connector")
+    def test_single_quote_in_password_escaped(
+        self, mock_mysql, mock_find_sock,
+    ):
+        from kanban_mcp.setup import _create_database
+        mock_find_sock.return_value = None
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_mysql.connect.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+
+        config = {
+            "db_name": "kanban", "db_user": "kanban",
+            "db_password": "pass'word",
+            "db_host": "localhost",
+            "mysql_root_user": "root",
+            "mysql_root_password": "rootpw",
+        }
+        _create_database(config)
+
+        executed = [
+            str(c) for c in mock_cursor.execute.call_args_list
+        ]
+        all_sql = " ".join(executed)
+        # The single quote must be escaped as ''
+        self.assertIn("pass''word", all_sql)
+        # Must NOT contain the unescaped version in SQL
+        # (the raw "pass'word" would break the SQL string)
+        # Check CREATE USER uses escaped form
+        for call in mock_cursor.execute.call_args_list:
+            sql = call[0][0]
+            if "CREATE USER" in sql:
+                self.assertIn("pass''word", sql)
+            if "ALTER USER" in sql:
+                self.assertIn("pass''word", sql)
+
+
+class TestCreateDatabaseTcpFallbackReportsCorrectError(
+    unittest.TestCase,
+):
+    """Test TCP fallback reports the TCP error, not socket error."""
+
+    @patch("kanban_mcp.setup._find_mysql_socket")
+    @patch("kanban_mcp.setup.mysql.connector")
+    def test_reports_tcp_error_not_socket_error(
+        self, mock_mysql, mock_find_sock,
+    ):
+        from kanban_mcp.setup import _create_database
+        from mysql.connector import Error as RealMySQLError
+        import io
+        from contextlib import redirect_stdout
+
+        mock_find_sock.return_value = (
+            "/var/run/mysqld/mysqld.sock"
+        )
+
+        socket_err = RealMySQLError("socket auth failed")
+        socket_err.errno = 1698
+
+        tcp_err = RealMySQLError("tcp access denied")
+        tcp_err.errno = 1045
+
+        mock_mysql.connect.side_effect = [
+            socket_err, tcp_err,
+        ]
+
+        config = {
+            "db_name": "kanban", "db_user": "kanban",
+            "db_password": "pw", "db_host": "localhost",
+            "mysql_root_user": "root",
+            "mysql_root_password": None,
+        }
+
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit), \
+                redirect_stdout(buf):
+            _create_database(config)
+
+        output = buf.getvalue()
+        # Should report the TCP error (1045 = access denied)
+        self.assertIn("Access denied", output)
+        # Should NOT contain the socket error message
+        self.assertNotIn("auth_socket", output)
+
+
+class TestEnsureSchemaMigrationsTableCharset(unittest.TestCase):
+    """Test schema_migrations table has ENGINE and charset."""
+
+    def test_includes_engine_and_charset(self):
+        from kanban_mcp.setup import (
+            _ensure_schema_migrations_table,
+        )
+        mock_cursor = MagicMock()
+        _ensure_schema_migrations_table(mock_cursor)
+        sql = mock_cursor.execute.call_args[0][0]
+        self.assertIn("ENGINE=InnoDB", sql)
+        self.assertIn("utf8mb4_unicode_ci", sql)
+
+
+class TestLoggingBeforeAutoMigrate(unittest.TestCase):
+    """Test logging.basicConfig runs before auto_migrate."""
+
+    @patch("kanban_mcp.setup.auto_migrate")
+    @patch(
+        "kanban_mcp.core.MySQLConnectionPool",
+    )
+    @patch.dict(os.environ, {
+        "KANBAN_DB_USER": "test",
+        "KANBAN_DB_PASSWORD": "test",
+        "KANBAN_DB_NAME": "test",
+    })
+    def test_basicconfig_before_auto_migrate(
+        self, mock_pool, mock_auto_migrate,
+    ):
+        """auto_migrate is called after logging.basicConfig."""
+        from kanban_mcp.core import KanbanMCPServer
+        import logging
+
+        call_order = []
+
+        original_basicConfig = logging.basicConfig
+
+        def track_basicConfig(**kwargs):
+            call_order.append("basicConfig")
+            original_basicConfig(**kwargs)
+
+        def track_auto_migrate(config):
+            call_order.append("auto_migrate")
+
+        mock_auto_migrate.side_effect = track_auto_migrate
+
+        with patch(
+            "logging.basicConfig",
+            side_effect=track_basicConfig,
+        ):
+            KanbanMCPServer()
+
+        self.assertIn("basicConfig", call_order)
+        self.assertIn("auto_migrate", call_order)
+        self.assertLess(
+            call_order.index("basicConfig"),
+            call_order.index("auto_migrate"),
+            "logging.basicConfig must run before auto_migrate",
+        )
 
 
 if __name__ == "__main__":

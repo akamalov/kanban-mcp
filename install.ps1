@@ -316,11 +316,25 @@ function Install-Pipx {
 function Install-KanbanMcp {
     $pkg = "kanban-mcp"
     if ($WithSemantic) { $pkg = "kanban-mcp[semantic]" }
-    Write-Host "Installing $pkg via pipx..."
-    if (Get-Command "pipx" -ErrorAction SilentlyContinue) {
-        pipx install $pkg
+    # If run from a checkout with pyproject.toml, install from local
+    # source instead of PyPI (ensures code and migrations match).
+    $src = $pkg
+    if (Test-Path "pyproject.toml") {
+        $content = Get-Content "pyproject.toml" -Raw -ErrorAction SilentlyContinue
+        if ($content -match 'name = "kanban-mcp"') {
+            $src = "."
+            if ($WithSemantic) { $src = ".[semantic]" }
+            Write-Host "Installing $pkg from local checkout via pipx..."
+        } else {
+            Write-Host "Installing $pkg via pipx..."
+        }
     } else {
-        & $script:Python -m pipx install $pkg
+        Write-Host "Installing $pkg via pipx..."
+    }
+    if (Get-Command "pipx" -ErrorAction SilentlyContinue) {
+        pipx install $src
+    } else {
+        & $script:Python -m pipx install $src
     }
     Write-Host "kanban-mcp installed."
 }
@@ -469,6 +483,36 @@ function Write-NextSteps {
     Write-Host "3. Verify installation:"
     Write-Host "   kanban-cli --project C:\path\to\your\project summary"
     Write-Host ""
+
+    # Print hook config snippet if hook commands are found
+    $hookStart = Get-Command "kanban-hook-session-start" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    $hookStop = Get-Command "kanban-hook-stop" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    if ($hookStart -and $hookStop) {
+        Write-Host "4. Set up hooks (recommended for Claude Code):"
+        Write-Host ""
+        Write-Host "   Hooks inject active kanban items at session start and"
+        Write-Host "   prompt for progress updates when the session ends."
+        Write-Host "   Without hooks, the agent only uses the board when asked."
+        Write-Host ""
+        Write-Host "   Merge into %USERPROFILE%\.claude\settings.json:"
+        Write-Host ""
+        Write-Host @"
+   {
+     "hooks": {
+       "SessionStart": [
+         { "hooks": [{ "type": "command", "command": "$hookStart" }] }
+       ],
+       "Stop": [
+         { "hooks": [{ "type": "command", "command": "$hookStop" }] }
+       ]
+     }
+   }
+"@
+        Write-Host ""
+        Write-Host "   If you already have hooks configured, add the entries to"
+        Write-Host "   the existing SessionStart and Stop arrays."
+        Write-Host ""
+    }
 }
 
 # ─── Step 1: Python & kanban-mcp ────────────────────────────────────

@@ -28,7 +28,7 @@ _BACKFILL_CUTOFF = 4
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kanban-setup",
-        description="Set up the MySQL database for kanban-mcp",
+        description="Set up the MySQL/MariaDB database for kanban-mcp",
     )
     parser.add_argument(
         "--auto",
@@ -53,15 +53,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--db-password", default=None, help="Database password",
     )
     parser.add_argument(
-        "--db-host", default=None, help="MySQL host",
+        "--db-host", default=None, help="MySQL/MariaDB host",
     )
     parser.add_argument(
         "--mysql-root-user", default=None,
-        help="MySQL admin user for setup",
+        help="MySQL/MariaDB admin user for setup",
     )
     parser.add_argument(
         "--mysql-root-password", default=None,
-        help="MySQL admin password",
+        help="MySQL/MariaDB admin password",
     )
     parser.add_argument(
         "--migrate-only",
@@ -235,11 +235,11 @@ def _run_interactive(args: argparse.Namespace) -> dict:
         "Database host", defaults["db_host"] or "localhost",
     )
     mysql_root_user = _prompt(
-        "MySQL root user for setup",
+        "MySQL/MariaDB root user for setup",
         defaults["mysql_root_user"] or "root",
     )
     mysql_root_password = _prompt(
-        "MySQL root password (blank for socket auth)", "",
+        "MySQL/MariaDB root password (blank for socket auth)", "",
     )
 
     return {
@@ -253,12 +253,13 @@ def _run_interactive(args: argparse.Namespace) -> dict:
 
 
 def _find_mysql_socket() -> str | None:
-    """Find the MySQL Unix socket path."""
+    """Find the MySQL/MariaDB Unix socket path."""
     candidates = [
-        "/var/run/mysqld/mysqld.sock",   # Debian/Ubuntu
-        "/var/lib/mysql/mysql.sock",     # RHEL/CentOS
-        "/tmp/mysql.sock",               # macOS (Homebrew)  # nosec B108
-        "/var/mysql/mysql.sock",         # macOS (official)
+        "/var/run/mysqld/mysqld.sock",    # Debian/Ubuntu
+        "/var/run/mariadb/mariadb.sock",  # MariaDB (Arch, Fedora)
+        "/var/lib/mysql/mysql.sock",      # RHEL/CentOS
+        "/tmp/mysql.sock",  # macOS (Homebrew)  # nosec B108
+        "/var/mysql/mysql.sock",          # macOS (official)
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -267,7 +268,7 @@ def _find_mysql_socket() -> str | None:
 
 
 def _print_auth_error(err: MySQLError, config: dict) -> None:
-    """Print a user-friendly error message based on MySQL error code."""
+    """Print a friendly error for a MySQL/MariaDB error code."""
     user = config["mysql_root_user"]
     host = config["db_host"]
     errno = getattr(err, "errno", None)
@@ -290,12 +291,12 @@ def _print_auth_error(err: MySQLError, config: dict) -> None:
         )
     elif errno in (2002, 2003):
         print(
-            f"Error: Cannot connect to MySQL at {host}."
+            f"Error: Cannot connect to MySQL/MariaDB at {host}."
             " Is the server running?"
         )
     else:
         print(
-            f"Error: Could not connect to MySQL"
+            f"Error: Could not connect to MySQL/MariaDB"
             f" as {user}: {err}"
             "\n  Try setting MYSQL_ROOT_PASSWORD or run"
             " `kanban-setup` interactively."
@@ -303,7 +304,7 @@ def _print_auth_error(err: MySQLError, config: dict) -> None:
 
 
 def _create_database(config: dict) -> None:
-    """Connect as MySQL root and create the database + user.
+    """Connect as MySQL/MariaDB root and create the database + user.
 
     On localhost without a root password, uses a fallback chain:
     1. Try Unix socket auth (Debian/Ubuntu default)
@@ -329,7 +330,7 @@ def _create_database(config: dict) -> None:
             # Remove host — socket and host are mutually exclusive
             connect_args.pop("host", None)
 
-    print("Connecting to MySQL as root...")
+    print("Connecting to MySQL/MariaDB as root...")
     try:
         conn = mysql.connector.connect(**connect_args)
     except MySQLError as e:
@@ -350,9 +351,9 @@ def _create_database(config: dict) -> None:
             }
             try:
                 conn = mysql.connector.connect(**tcp_args)
-            except MySQLError:
-                # Both attempts failed — give specific guidance
-                _print_auth_error(e, config)
+            except MySQLError as tcp_err:
+                # Both attempts failed — report the TCP error
+                _print_auth_error(tcp_err, config)
                 sys.exit(1)
         else:
             _print_auth_error(e, config)
@@ -362,6 +363,8 @@ def _create_database(config: dict) -> None:
     db = config["db_name"]
     user = config["db_user"]
     pw = config["db_password"]
+    # Escape single quotes for SQL string literals
+    pw_escaped = pw.replace("'", "''")
 
     statements = [
         (
@@ -370,22 +373,22 @@ def _create_database(config: dict) -> None:
         ),
         (
             f"CREATE USER IF NOT EXISTS '{user}'@'localhost'"
-            f" IDENTIFIED BY '{pw}'"
+            f" IDENTIFIED BY '{pw_escaped}'"
         ),
         (
             f"CREATE USER IF NOT EXISTS '{user}'@'%'"
-            f" IDENTIFIED BY '{pw}'"
+            f" IDENTIFIED BY '{pw_escaped}'"
         ),
         # ALTER USER ensures password is current even if the
         # user already existed (CREATE IF NOT EXISTS is a no-op
         # for existing users, leaving stale passwords).
         (
             f"ALTER USER '{user}'@'localhost'"
-            f" IDENTIFIED BY '{pw}'"
+            f" IDENTIFIED BY '{pw_escaped}'"
         ),
         (
             f"ALTER USER '{user}'@'%'"
-            f" IDENTIFIED BY '{pw}'"
+            f" IDENTIFIED BY '{pw_escaped}'"
         ),
         f"GRANT ALL PRIVILEGES ON `{db}`.* TO '{user}'@'localhost'",
         f"GRANT ALL PRIVILEGES ON `{db}`.* TO '{user}'@'%'",
@@ -402,10 +405,48 @@ def _create_database(config: dict) -> None:
 
 
 def _split_sql(sql: str) -> list[str]:
-    """Split a SQL script on semicolons, ignoring empty statements."""
-    return [
-        s.strip() for s in sql.split(";") if s.strip()
-    ]
+    """Split a SQL script on semicolons, respecting quotes.
+
+    Strips ``-- …`` line comments while preserving ``--`` that
+    appears inside single-quoted string literals.
+    """
+    # 1. Strip comments, but not inside quotes
+    cleaned_lines: list[str] = []
+    for line in sql.splitlines():
+        out: list[str] = []
+        in_quote = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and in_quote:
+                # backslash escape — consume next char as-is
+                out.append(ch)
+                if i + 1 < len(line):
+                    i += 1
+                    out.append(line[i])
+            elif ch == "'" and not in_quote:
+                in_quote = True
+                out.append(ch)
+            elif ch == "'" and in_quote:
+                # handle escaped quote ('')
+                if i + 1 < len(line) and line[i + 1] == "'":
+                    out.append("''")
+                    i += 1
+                else:
+                    in_quote = False
+                    out.append(ch)
+            elif ch == "-" and not in_quote:
+                if i + 1 < len(line) and line[i + 1] == "-":
+                    break  # rest of line is a comment
+                out.append(ch)
+            else:
+                out.append(ch)
+            i += 1
+        cleaned_lines.append("".join(out))
+    cleaned = "\n".join(cleaned_lines)
+
+    # 2. Split on semicolons
+    return [s.strip() for s in cleaned.split(";") if s.strip()]
 
 
 def _ensure_schema_migrations_table(cursor) -> None:
@@ -414,7 +455,8 @@ def _ensure_schema_migrations_table(cursor) -> None:
         CREATE TABLE IF NOT EXISTS schema_migrations (
             filename VARCHAR(255) PRIMARY KEY,
             applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          COLLATE=utf8mb4_unicode_ci
     """)
 
 
@@ -534,7 +576,24 @@ def _run_migrations(config: dict) -> None:
         sql = mfile.read_text()
         try:
             for stmt in _split_sql(sql):
-                cursor.execute(stmt)
+                try:
+                    cursor.execute(stmt)
+                    # Drain any result sets (e.g. from
+                    # OPTIMIZE TABLE) so the next statement
+                    # doesn't hit "Unread result found".
+                    try:
+                        cursor.fetchall()
+                    except Exception:  # nosec B110
+                        pass
+                except MySQLError as stmt_err:
+                    # 1146 = Table doesn't exist.  Skip
+                    # gracefully — the table may be optional
+                    # (e.g. embeddings without semantic search).
+                    if stmt_err.errno == 1146:
+                        tbl = getattr(stmt_err, "msg", str(stmt_err))
+                        print(f"    Skipped (table absent): {tbl}")
+                        continue
+                    raise
             cursor.execute(
                 "INSERT INTO schema_migrations"
                 " (filename) VALUES (%s)",
@@ -603,7 +662,20 @@ def auto_migrate(db_config: dict) -> None:
             sql = mfile.read_text()
             try:
                 for stmt in _split_sql(sql):
-                    cursor.execute(stmt)
+                    try:
+                        cursor.execute(stmt)
+                        try:
+                            cursor.fetchall()
+                        except Exception:  # nosec B110
+                            pass
+                    except MySQLError as stmt_err:
+                        if stmt_err.errno == 1146:
+                            log.info(
+                                "  Skipped (table absent):"
+                                " %s", stmt_err,
+                            )
+                            continue
+                        raise
                 cursor.execute(
                     "INSERT INTO schema_migrations"
                     " (filename) VALUES (%s)",
@@ -686,7 +758,7 @@ def main() -> None:
         print(f"  rm -rf {get_config_dir()}")
         print()
         print(
-            "To drop the MySQL database and user,"
+            "To drop the MySQL/MariaDB database and user,"
             " connect as root and run:"
         )
         print("  DROP DATABASE IF EXISTS kanban;")
