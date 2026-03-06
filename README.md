@@ -2,6 +2,16 @@
 
 A database-backed kanban board that AI coding agents use via [MCP](https://modelcontextprotocol.io/) (Model Context Protocol). Track issues, features, todos, epics, and diary entries across all your projects — with a web UI for humans and 40+ tools for agents.
 
+![Kanban board overview](webui.png)
+
+<details>
+<summary>More screenshots</summary>
+
+![Activity timeline](webui-timeline.png)
+![New item dialog](webui-issue.png)
+
+</details>
+
 ## What It Does
 
 - **Persistent project tracking** — issues, features, todos, epics, diary entries stored in MySQL/MariaDB
@@ -33,7 +43,7 @@ The install script handles everything: installs pipx and kanban-mcp, detects MyS
 ```bash
 pipx install kanban-mcp[semantic]
 kanban-setup
-kanban-cli --project . summary
+kanban-cli --project "$(pwd)" summary
 ```
 
 ## Prerequisites
@@ -408,6 +418,77 @@ Windows:
 If you already have hooks configured, add the kanban entries to your existing arrays — don't replace them.
 
 > **Tip:** `install.sh` and `install.ps1` print a ready-to-use config snippet with your resolved paths after setup completes.
+
+## Usage
+
+### First session
+
+Once installed and configured, open your AI agent in a project directory. The first time you do this:
+
+1. The session start hook fires but exits silently (it doesn't know about this project yet)
+2. The agent needs to call `set_current_project` with your working directory's **absolute path** — this auto-creates the project in the database
+3. From this point, all kanban tools work against this project
+4. At session end, the stop hook lists any in-progress items and suggests logging progress
+
+On subsequent sessions in the same directory, the start hook injects your active items into the conversation automatically — the agent picks up where you left off.
+
+There is no "create project" command. Projects are created implicitly the first time `set_current_project` is called for a directory. If the agent doesn't call it on its own, ask it to — or the hooks will handle project context once the project exists in the database.
+
+> **Important:** `set_current_project` hashes the directory path as-is to identify the project. Always pass the absolute path (e.g. `/home/you/my-project`), not a relative path like `.` — relative paths will create a different project entry.
+
+### Three interfaces
+
+kanban-mcp provides three ways to interact with the same data:
+
+**MCP tools** — 40+ tools the AI agent calls during conversation. This is the primary interface. The agent creates items, tracks dependencies, advances statuses, and logs progress as part of your normal workflow. You don't need to tell it to — the session hooks provide context and the agent uses the tools naturally.
+
+**Web UI** — a browser-based kanban board for humans.
+
+```bash
+kanban-web                    # http://127.0.0.1:5000
+kanban-web --port 8080        # custom port
+kanban-web --host 0.0.0.0     # network-accessible (no auth — use with care)
+```
+
+The board shows all status columns (backlog → todo → in_progress → review → done → closed) with drag-and-drop between them. Use the project dropdown in the header to switch between projects. Cards show priority, tags, epic membership, blocking relationships, and progress bars for epics.
+
+**CLI** — `kanban-cli` for terminal queries, scripts, and exports. Every command takes `--project PATH` (the same directory path you'd use with your agent) and an optional `--format {text,json}`.
+
+### CLI reference
+
+All commands take `--project PATH` with the **absolute path** to your project directory, and an optional `--format {text,json}`.
+
+```bash
+# What's currently being worked on?
+kanban-cli --project /path/to/project active
+
+# What's in the backlog?
+kanban-cli --project /path/to/project todos
+
+# Project overview — counts by type and status
+kanban-cli --project /path/to/project summary
+
+# Search items and updates
+kanban-cli --project /path/to/project search "authentication"
+
+# Semantic search (requires [semantic] extra)
+kanban-cli --project /path/to/project semantic-search "auth problems" --limit 5
+
+# Export the full board
+kanban-cli --project /path/to/project export --format markdown
+kanban-cli --project /path/to/project export --format json --metrics --relationships
+
+# Get children of an epic
+kanban-cli --project /path/to/project children 42 --recursive
+
+# Context dump (what the session hooks use internally)
+kanban-cli --project /path/to/project context
+
+# Rebuild embeddings after bulk changes
+kanban-cli --project /path/to/project rebuild-embeddings
+```
+
+> **Important:** Use the same absolute path you'd use with `set_current_project`. The path is hashed to identify the project — `--project .` and `--project $PWD` will create different project entries.
 
 ## Upgrading
 
