@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Simple web UI for kanban-mcp."""
 
+import os
 import sys
 
 from flask import Flask, render_template, request, jsonify, Response
@@ -923,7 +924,8 @@ def main():
     parser = argparse.ArgumentParser(description='Kanban web UI')
     parser.add_argument(
         '--port', '-p', type=int,
-        default=5000, help='Port to run on',
+        default=int(os.environ.get('KANBAN_WEB_PORT', 5100)),
+        help='Port to run on (env: KANBAN_WEB_PORT)',
     )
     parser.add_argument(
         '--host', '-H', default='127.0.0.1',

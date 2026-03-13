@@ -34,4 +34,5 @@ auto_migrate({
 })
 "
 
-exec gunicorn -b 0.0.0.0:5000 kanban_mcp.web:app
+PORT=${KANBAN_WEB_PORT:-5100}
+exec gunicorn -b "0.0.0.0:${PORT}" kanban_mcp.web:app

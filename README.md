@@ -21,7 +21,7 @@ A database-backed kanban board that AI coding agents use via [MCP](https://model
 - **Semantic search** — find similar items using local ONNX embeddings (optional; downloads [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) from HuggingFace on first use, ~140MB)
 - **Activity timeline** — unified view of status changes, decisions, updates, and git commits
 - **Export** — JSON, YAML, or Markdown output with filters
-- **Web UI** — browser-based board at localhost:5000
+- **Web UI** — browser-based board at localhost:5100 (configurable via `KANBAN_WEB_PORT`)
 - **Session hooks** — inject active items into AI agent sessions automatically
 
 ## Quick Start
@@ -123,12 +123,15 @@ cd kanban-mcp
 docker compose up
 ```
 
-This starts MySQL 8.0 and the web UI on port 5000. Migrations run automatically on web container startup. The database is exposed on port 3306 so the host-side MCP server can connect. The MCP server still needs a separate install (pipx or pip) since MCP clients spawn it as a subprocess.
+This starts MySQL 8.0 and the web UI on port 5100 (default). Migrations run automatically on web container startup. The database is exposed on port 3306 so the host-side MCP server can connect. The MCP server still needs a separate install (pipx or pip) since MCP clients spawn it as a subprocess.
 
-Credentials are configurable via environment variables:
+Credentials and port are configurable via environment variables:
 
 ```bash
 KANBAN_DB_USER=myuser KANBAN_DB_PASSWORD=secret docker compose up
+
+# Custom web UI port
+KANBAN_WEB_PORT=8080 docker compose up
 ```
 
 ## Database Setup
@@ -241,6 +244,7 @@ All install methods (pipx, pip, source) use this same location. You can also set
 | `KANBAN_DB_PASSWORD` | Yes | — | Database password |
 | `KANBAN_DB_NAME` | Yes | — | Database name |
 | `KANBAN_DB_POOL_SIZE` | No | `5` | Connection pool size |
+| `KANBAN_WEB_PORT` | No | `5100` | Web UI port (kanban-web and Docker) |
 | `KANBAN_PROJECT_DIR` | No | — | Override project directory detection |
 
 ### MCP Client Setup
@@ -445,9 +449,10 @@ kanban-mcp provides three ways to interact with the same data:
 **Web UI** — a browser-based kanban board for humans.
 
 ```bash
-kanban-web                    # http://127.0.0.1:5000
+kanban-web                    # http://127.0.0.1:5100
 kanban-web --port 8080        # custom port
 kanban-web --host 0.0.0.0     # network-accessible (no auth — use with care)
+# KANBAN_WEB_PORT=5100 kanban-web  # via environment variable
 ```
 
 The board shows all status columns (backlog → todo → in_progress → review → done → closed) with drag-and-drop between them. Use the project dropdown in the header to switch between projects. Cards show priority, tags, epic membership, blocking relationships, and progress bars for epics.
@@ -593,7 +598,7 @@ If your client supports hooks (Claude Code, Gemini CLI, VS Code Copilot, Copilot
 | Command | Description |
 |---------|-------------|
 | `kanban-mcp` | MCP server (STDIO JSON-RPC) — used by AI clients |
-| `kanban-web` | Web UI on localhost:5000 (`--port`, `--host`, `--debug` flags) |
+| `kanban-web` | Web UI on localhost:5100 (`--port`/`KANBAN_WEB_PORT`, `--host`, `--debug` flags) |
 | `kanban-cli` | CLI for manual queries and hook scripts (`--project`, `--format` flags) |
 | `kanban-setup` | Database setup wizard (`--auto` for non-interactive, `--with-semantic`) |
 | `kanban-hook-session-start` | Session start hook — injects active items into agent sessions |
@@ -716,6 +721,21 @@ pytest
 # Run frontend JS tests (requires Node.js — optional, only touches web UI code)
 npm install && npm test
 ```
+
+# Quick Up and Running
+
+## Issue the following command:
+
+```bash
+docker compose up
+```
+
+## Activate a project - Example project `povaro`
+
+```bash
+kanban-cli --project /projects/povaro active
+```
+
 
 ## License
 

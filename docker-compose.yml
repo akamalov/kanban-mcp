@@ -18,12 +18,13 @@ services:
   web:
     build: .
     ports:
-      - "5000:5000"
+      - "${KANBAN_WEB_PORT:-5100}:${KANBAN_WEB_PORT:-5100}"
     environment:
       KANBAN_DB_HOST: db
       KANBAN_DB_USER: ${KANBAN_DB_USER:-kanban}
       KANBAN_DB_PASSWORD: ${KANBAN_DB_PASSWORD:-changeme}
       KANBAN_DB_NAME: ${KANBAN_DB_NAME:-kanban}
+      KANBAN_WEB_PORT: ${KANBAN_WEB_PORT:-5100}
     depends_on:
       db:
         condition: service_healthy
